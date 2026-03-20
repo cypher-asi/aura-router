@@ -43,11 +43,13 @@ pub fn provider_url(provider: &Provider) -> &'static str {
 }
 
 /// Build provider-specific headers for the upstream request.
-pub fn provider_headers(provider: &Provider, api_key: &str) -> HeaderMap {
+///
+/// Returns None if the API key contains invalid header characters.
+pub fn provider_headers(provider: &Provider, api_key: &str) -> Option<HeaderMap> {
     let mut headers = HeaderMap::new();
     match provider {
         Provider::Anthropic => {
-            headers.insert("x-api-key", HeaderValue::from_str(api_key).unwrap());
+            headers.insert("x-api-key", HeaderValue::from_str(api_key).ok()?);
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             headers.insert(
                 "anthropic-beta",
@@ -57,10 +59,10 @@ pub fn provider_headers(provider: &Provider, api_key: &str) -> HeaderMap {
         Provider::OpenAi => {
             headers.insert(
                 "authorization",
-                HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+                HeaderValue::from_str(&format!("Bearer {api_key}")).ok()?,
             );
         }
     }
     headers.insert("content-type", HeaderValue::from_static("application/json"));
-    headers
+    Some(headers)
 }

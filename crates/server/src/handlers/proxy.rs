@@ -91,7 +91,8 @@ pub async fn messages(
 
     // Forward to provider
     let upstream_url = providers::provider_url(&provider);
-    let upstream_headers = providers::provider_headers(&provider, &api_key);
+    let upstream_headers = providers::provider_headers(&provider, &api_key)
+        .ok_or_else(|| AppError::Internal("Invalid API key format".into()))?;
 
     let upstream_resp = state
         .http_client
