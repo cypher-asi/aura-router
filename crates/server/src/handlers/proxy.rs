@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 
 use aura_router_auth::AuthUser;
 use aura_router_core::AppError;
-use aura_router_proxy::{billing, providers, stats};
+use aura_router_proxy::{billing, providers, stats, stream};
 
 use crate::state::AppState;
 
@@ -91,14 +91,19 @@ pub async fn messages(
     }
 
     if is_streaming {
-        // Streaming will be handled in Sprint 3
-        // For now, return error if streaming is requested
-        return Err(AppError::BadRequest(
-            "Streaming not yet supported — use stream: false".into(),
-        ));
+        return handle_streaming(auth, state, model, upstream_resp).await;
     }
 
-    // Non-streaming: read full response, extract usage, debit, return
+    handle_non_streaming(auth, state, model, upstream_resp).await
+}
+
+/// Handle non-streaming response: read full body, extract usage, debit, return.
+async fn handle_non_streaming(
+    auth: AuthUser,
+    state: AppState,
+    model: &str,
+    upstream_resp: reqwest::Response,
+) -> Result<Response, AppError> {
     let response_bytes = upstream_resp
         .bytes()
         .await
@@ -118,15 +123,74 @@ pub async fn messages(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    // Fire-and-forget: debit credits via z-billing
+    spawn_post_request_tasks(&state, &auth.user_id, model, input_tokens, output_tokens);
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        Body::from(response_bytes),
+    )
+        .into_response())
+}
+
+/// Handle streaming response: tee SSE stream to client while capturing billing data.
+async fn handle_streaming(
+    auth: AuthUser,
+    state: AppState,
+    model: &str,
+    upstream_resp: reqwest::Response,
+) -> Result<Response, AppError> {
+    let model_owned = model.to_string();
+    let (tee_stream, usage_rx) = stream::proxy_stream(upstream_resp);
+
+    // Spawn task to handle billing after stream completes
+    let billing_state = state.clone();
+    let user_id = auth.user_id.clone();
+    tokio::spawn(async move {
+        if let Ok(usage) = usage_rx.await {
+            let model = usage.model.as_deref().unwrap_or(&model_owned);
+            spawn_post_request_tasks(
+                &billing_state,
+                &user_id,
+                model,
+                usage.input_tokens,
+                usage.output_tokens,
+            );
+        }
+    });
+
+    let body = Body::from_stream(tee_stream);
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Fire-and-forget tasks: debit z-billing + record to aura-network.
+fn spawn_post_request_tasks(
+    state: &AppState,
+    user_id: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) {
     let event_id = uuid::Uuid::new_v4().to_string();
     let model_owned = model.to_string();
-    let user_id = auth.user_id.clone();
+    let user_id_owned = user_id.to_string();
+
+    // Debit z-billing
     {
         let client = state.http_client.clone();
         let billing_url = state.z_billing_url.clone();
         let billing_key = state.z_billing_api_key.clone();
-        let user_id = user_id.clone();
+        let user_id = user_id_owned.clone();
+        let model = model_owned.clone();
         tokio::spawn(async move {
             if let Err(e) = billing::report_usage(
                 &client,
@@ -135,7 +199,7 @@ pub async fn messages(
                 &event_id,
                 &user_id,
                 "anthropic",
-                &model_owned,
+                &model,
                 input_tokens,
                 output_tokens,
             )
@@ -146,34 +210,27 @@ pub async fn messages(
         });
     }
 
-    // Fire-and-forget: record usage to aura-network
+    // Record to aura-network
     if let (Some(ref network_url), Some(ref network_token)) =
         (&state.aura_network_url, &state.aura_network_token)
     {
         let client = state.http_client.clone();
         let url = network_url.clone();
         let token = network_token.clone();
-        let model_for_stats = model.to_string();
+        let user_id = user_id_owned;
+        let model = model_owned;
         tokio::spawn(async move {
             stats::record_usage(
                 &client,
                 &url,
                 &token,
                 &user_id,
-                &model_for_stats,
+                &model,
                 input_tokens,
                 output_tokens,
-                (input_tokens + output_tokens) as f64 * 0.00001, // rough cost estimate
+                (input_tokens + output_tokens) as f64 * 0.00001,
             )
             .await;
         });
     }
-
-    // Return provider response as-is
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        Body::from(response_bytes),
-    )
-        .into_response())
 }

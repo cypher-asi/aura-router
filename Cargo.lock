@@ -75,10 +75,13 @@ name = "aura-router-proxy"
 version = "0.1.0"
 dependencies = [
  "aura-router-core",
+ "bytes",
  "chrono",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid",
 ]

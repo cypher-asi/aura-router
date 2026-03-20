@@ -11,3 +11,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
