@@ -76,7 +76,7 @@ The `/v1/messages` endpoint accepts Anthropic-compatible request bodies. The rou
 
 **Supported models:**
 - Anthropic: `claude-*` (e.g., `claude-sonnet-4-6`, `claude-opus-4-6`)
-- OpenAI: `gpt-*`, `o1-*`, `o3-*`, `o4-*` (requires `OPENAI_API_KEY`)
+- OpenAI: `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `codex-*` (requires `OPENAI_API_KEY`)
 
 **Request flow:**
 1. Authenticate via JWT (`Authorization: Bearer <token>`)

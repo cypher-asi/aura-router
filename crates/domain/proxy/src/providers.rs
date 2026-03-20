@@ -27,6 +27,7 @@ pub fn resolve_provider(model: &str) -> Option<Provider> {
         || model.starts_with("o1")
         || model.starts_with("o3")
         || model.starts_with("o4")
+        || model.starts_with("codex")
     {
         Some(Provider::OpenAi)
     } else {
