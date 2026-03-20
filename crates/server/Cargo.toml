@@ -1,0 +1,27 @@
+[package]
+name = "aura-router-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aura-router-server"
+path = "src/main.rs"
+
+[dependencies]
+aura-router-core = { workspace = true }
+aura-router-auth = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = "1"
+reqwest = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
