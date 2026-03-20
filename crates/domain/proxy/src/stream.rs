@@ -5,7 +5,6 @@
 //! `message_delta` events. This preserves exact SSE framing and minimizes latency.
 
 use bytes::Bytes;
-use futures_util::StreamExt;
 use tokio::sync::oneshot;
 
 /// Token usage extracted from an SSE stream.

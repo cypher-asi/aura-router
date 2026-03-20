@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 
 use aura_router_auth::AuthUser;
 use aura_router_core::AppError;
-use aura_router_proxy::{billing, providers, stats, stream};
+use aura_router_proxy::{billing, providers, stats, storage, stream};
 
 use crate::state::AppState;
 
@@ -25,6 +25,7 @@ use crate::state::AppState;
 pub async fn messages(
     auth: AuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     body: bytes::Bytes,
 ) -> Result<Response, AppError> {
     // Parse just the model and stream fields from the request body
@@ -62,6 +63,21 @@ pub async fn messages(
         });
     }
 
+    // Extract session context from custom headers (optional, for storage recording)
+    let session_ctx = storage::SessionContext::from_headers(&headers);
+
+    // Extract user content from the request for storage (last user message)
+    let user_content = request_value
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|msgs| {
+            msgs.iter()
+                .rfind(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        })
+        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        .unwrap_or("")
+        .to_string();
+
     // [ENRICHMENT HOOK — v1: pass-through, future: RAG/memory/prompt modification]
 
     // Forward to provider
@@ -91,10 +107,11 @@ pub async fn messages(
     }
 
     if is_streaming {
-        return handle_streaming(auth, state, model, upstream_resp).await;
+        return handle_streaming(auth, state, model, upstream_resp, session_ctx, user_content)
+            .await;
     }
 
-    handle_non_streaming(auth, state, model, upstream_resp).await
+    handle_non_streaming(auth, state, model, upstream_resp, session_ctx, user_content).await
 }
 
 /// Handle non-streaming response: read full body, extract usage, debit, return.
@@ -103,13 +120,15 @@ async fn handle_non_streaming(
     state: AppState,
     model: &str,
     upstream_resp: reqwest::Response,
+    session_ctx: Option<storage::SessionContext>,
+    user_content: String,
 ) -> Result<Response, AppError> {
     let response_bytes = upstream_resp
         .bytes()
         .await
         .map_err(|e| AppError::ProviderError(format!("Failed to read provider response: {e}")))?;
 
-    // Extract token counts from response
+    // Extract token counts and content from response
     let response_value: serde_json::Value =
         serde_json::from_slice(&response_bytes).unwrap_or_default();
 
@@ -125,6 +144,45 @@ async fn handle_non_streaming(
 
     spawn_post_request_tasks(&state, &auth.user_id, model, input_tokens, output_tokens);
 
+    // Store messages to aura-storage if session context is present
+    if let Some(ctx) = session_ctx {
+        if let (Some(ref storage_url), Some(ref storage_token)) =
+            (&state.aura_storage_url, &state.aura_storage_token)
+        {
+            let assistant_content = response_value
+                .get("content")
+                .and_then(|v| v.as_array())
+                .and_then(|blocks| {
+                    blocks
+                        .iter()
+                        .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .and_then(|b| b.get("text").and_then(|t| t.as_str()))
+                })
+                .unwrap_or("")
+                .to_string();
+
+            let client = state.http_client.clone();
+            let url = storage_url.clone();
+            let token = storage_token.clone();
+            let user_id = auth.user_id.clone();
+            tokio::spawn(async move {
+                storage::store_messages(
+                    &client,
+                    &url,
+                    &token,
+                    &ctx,
+                    &user_id,
+                    &user_content,
+                    &assistant_content,
+                    None,
+                    input_tokens,
+                    output_tokens,
+                )
+                .await;
+            });
+        }
+    }
+
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
@@ -139,11 +197,13 @@ async fn handle_streaming(
     state: AppState,
     model: &str,
     upstream_resp: reqwest::Response,
+    session_ctx: Option<storage::SessionContext>,
+    user_content: String,
 ) -> Result<Response, AppError> {
     let model_owned = model.to_string();
     let (tee_stream, usage_rx) = stream::proxy_stream(upstream_resp);
 
-    // Spawn task to handle billing after stream completes
+    // Spawn task to handle billing + storage after stream completes
     let billing_state = state.clone();
     let user_id = auth.user_id.clone();
     tokio::spawn(async move {
@@ -156,6 +216,28 @@ async fn handle_streaming(
                 usage.input_tokens,
                 usage.output_tokens,
             );
+
+            // Store messages to aura-storage if session context is present
+            if let Some(ctx) = session_ctx {
+                if let (Some(ref storage_url), Some(ref storage_token)) = (
+                    &billing_state.aura_storage_url,
+                    &billing_state.aura_storage_token,
+                ) {
+                    storage::store_messages(
+                        &billing_state.http_client,
+                        storage_url,
+                        storage_token,
+                        &ctx,
+                        &user_id,
+                        &user_content,
+                        "[streamed response]",
+                        None,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                    )
+                    .await;
+                }
+            }
         }
     });
 

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 aura-router-core = { workspace = true }
+axum = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

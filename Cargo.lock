@@ -75,6 +75,7 @@ name = "aura-router-proxy"
 version = "0.1.0"
 dependencies = [
  "aura-router-core",
+ "axum",
  "bytes",
  "chrono",
  "futures-util",
