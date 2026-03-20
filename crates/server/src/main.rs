@@ -62,6 +62,9 @@ async fn main() -> anyhow::Result<()> {
         internal_token: InternalToken(internal_token),
         http_client: reqwest::Client::new(),
         anthropic_api_key,
+        openai_api_key: std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty()),
         z_billing_url,
         z_billing_api_key,
         aura_network_url: std::env::var("AURA_NETWORK_URL")

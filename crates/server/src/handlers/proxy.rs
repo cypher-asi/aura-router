@@ -80,9 +80,18 @@ pub async fn messages(
 
     // [ENRICHMENT HOOK — v1: pass-through, future: RAG/memory/prompt modification]
 
+    // Resolve API key for the provider
+    let api_key = match provider {
+        providers::Provider::Anthropic => state.anthropic_api_key.clone(),
+        providers::Provider::OpenAi => state
+            .openai_api_key
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("OpenAI provider not configured".into()))?,
+    };
+
     // Forward to provider
     let upstream_url = providers::provider_url(&provider);
-    let upstream_headers = providers::provider_headers(&provider, &state.anthropic_api_key);
+    let upstream_headers = providers::provider_headers(&provider, &api_key);
 
     let upstream_resp = state
         .http_client
@@ -106,12 +115,31 @@ pub async fn messages(
             .into_response());
     }
 
+    let provider_name = provider.name();
+
     if is_streaming {
-        return handle_streaming(auth, state, model, upstream_resp, session_ctx, user_content)
-            .await;
+        return handle_streaming(
+            auth,
+            state,
+            model,
+            provider_name,
+            upstream_resp,
+            session_ctx,
+            user_content,
+        )
+        .await;
     }
 
-    handle_non_streaming(auth, state, model, upstream_resp, session_ctx, user_content).await
+    handle_non_streaming(
+        auth,
+        state,
+        model,
+        provider_name,
+        upstream_resp,
+        session_ctx,
+        user_content,
+    )
+    .await
 }
 
 /// Handle non-streaming response: read full body, extract usage, debit, return.
@@ -119,6 +147,7 @@ async fn handle_non_streaming(
     auth: AuthUser,
     state: AppState,
     model: &str,
+    provider_name: &str,
     upstream_resp: reqwest::Response,
     session_ctx: Option<storage::SessionContext>,
     user_content: String,
@@ -142,7 +171,14 @@ async fn handle_non_streaming(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    spawn_post_request_tasks(&state, &auth.user_id, model, input_tokens, output_tokens);
+    spawn_post_request_tasks(
+        &state,
+        &auth.user_id,
+        provider_name,
+        model,
+        input_tokens,
+        output_tokens,
+    );
 
     // Store messages to aura-storage if session context is present
     if let Some(ctx) = session_ctx {
@@ -196,11 +232,13 @@ async fn handle_streaming(
     auth: AuthUser,
     state: AppState,
     model: &str,
+    provider_name: &str,
     upstream_resp: reqwest::Response,
     session_ctx: Option<storage::SessionContext>,
     user_content: String,
 ) -> Result<Response, AppError> {
     let model_owned = model.to_string();
+    let provider_owned = provider_name.to_string();
     let (tee_stream, usage_rx) = stream::proxy_stream(upstream_resp);
 
     // Spawn task to handle billing + storage after stream completes
@@ -212,6 +250,7 @@ async fn handle_streaming(
             spawn_post_request_tasks(
                 &billing_state,
                 &user_id,
+                &provider_owned,
                 model,
                 usage.input_tokens,
                 usage.output_tokens,
@@ -258,6 +297,7 @@ async fn handle_streaming(
 fn spawn_post_request_tasks(
     state: &AppState,
     user_id: &str,
+    provider_name: &str,
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
@@ -265,6 +305,7 @@ fn spawn_post_request_tasks(
     let event_id = uuid::Uuid::new_v4().to_string();
     let model_owned = model.to_string();
     let user_id_owned = user_id.to_string();
+    let provider_owned = provider_name.to_string();
 
     // Debit z-billing
     {
@@ -273,6 +314,7 @@ fn spawn_post_request_tasks(
         let billing_key = state.z_billing_api_key.clone();
         let user_id = user_id_owned.clone();
         let model = model_owned.clone();
+        let provider = provider_owned.clone();
         tokio::spawn(async move {
             if let Err(e) = billing::report_usage(
                 &client,
@@ -280,7 +322,7 @@ fn spawn_post_request_tasks(
                 &billing_key,
                 &event_id,
                 &user_id,
-                "anthropic",
+                &provider,
                 &model,
                 input_tokens,
                 output_tokens,

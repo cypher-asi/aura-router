@@ -3,15 +3,32 @@
 use reqwest::header::{HeaderMap, HeaderValue};
 
 /// Supported LLM providers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Provider {
     Anthropic,
+    OpenAi,
+}
+
+impl Provider {
+    /// Provider name string for billing/stats.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAi => "openai",
+        }
+    }
 }
 
 /// Resolve a model name to its provider.
 pub fn resolve_provider(model: &str) -> Option<Provider> {
     if model.starts_with("claude") {
         Some(Provider::Anthropic)
+    } else if model.starts_with("gpt")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+    {
+        Some(Provider::OpenAi)
     } else {
         None
     }
@@ -21,6 +38,7 @@ pub fn resolve_provider(model: &str) -> Option<Provider> {
 pub fn provider_url(provider: &Provider) -> &'static str {
     match provider {
         Provider::Anthropic => "https://api.anthropic.com/v1/messages",
+        Provider::OpenAi => "https://api.openai.com/v1/chat/completions",
     }
 }
 
@@ -35,8 +53,14 @@ pub fn provider_headers(provider: &Provider, api_key: &str) -> HeaderMap {
                 "anthropic-beta",
                 HeaderValue::from_static("prompt-caching-2024-07-31"),
             );
-            headers.insert("content-type", HeaderValue::from_static("application/json"));
+        }
+        Provider::OpenAi => {
+            headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+            );
         }
     }
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
     headers
 }
