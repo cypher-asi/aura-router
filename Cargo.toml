@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/auth",
     "crates/server",
+    "crates/domain/proxy",
 ]
 
 [workspace.dependencies]
@@ -27,3 +28,4 @@ futures-util = "0.3"
 # Internal crates
 aura-router-core = { path = "crates/core" }
 aura-router-auth = { path = "crates/auth" }
+aura-router-proxy = { path = "crates/domain/proxy" }

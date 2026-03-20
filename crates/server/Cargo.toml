@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 aura-router-core = { workspace = true }
 aura-router-auth = { workspace = true }
+aura-router-proxy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

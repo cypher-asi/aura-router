@@ -1,3 +1,5 @@
+pub mod proxy;
+
 use axum::Json;
 
 pub async fn health() -> Json<serde_json::Value> {

@@ -71,12 +71,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-router-proxy"
+version = "0.1.0"
+dependencies = [
+ "aura-router-core",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "aura-router-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "aura-router-auth",
  "aura-router-core",
+ "aura-router-proxy",
  "axum",
  "bytes",
  "chrono",
