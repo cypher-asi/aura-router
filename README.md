@@ -55,6 +55,15 @@ curl http://localhost:3000/health
 | `AURA_STORAGE_URL` | No | aura-storage URL for message storage |
 | `AURA_STORAGE_TOKEN` | No | aura-storage internal service token |
 | `CORS_ORIGINS` | No | Comma-separated allowed origins. Omit for permissive (dev mode) |
+| `RATE_LIMIT_RPM` | No | Max requests per minute per user (default: 60) |
+
+---
+
+## Authentication
+
+All proxy endpoints require a JWT in the `Authorization: Bearer <token>` header. Tokens are obtained by logging in via zOS API (`POST https://zosapi.zero.tech/api/v2/accounts/login`).
+
+Both RS256 (Auth0 JWKS) and HS256 (shared secret) tokens are accepted — same token format as aura-network and aura-storage.
 
 ---
 
@@ -125,6 +134,7 @@ LLM Provider (api.anthropic.com / api.openai.com)
 |---|---|
 | Invalid/missing JWT | 401 Unauthorized |
 | Insufficient credits | 402 Payment Required |
+| Rate limited | 429 Too Many Requests (with Retry-After header) |
 | Unsupported model | 400 Bad Request |
 | z-billing unreachable | 503 Service Unavailable |
 | Provider unreachable | 502 Bad Gateway |
