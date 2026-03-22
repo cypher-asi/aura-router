@@ -288,6 +288,7 @@ async fn handle_streaming(
         [
             (header::CONTENT_TYPE, "text/event-stream"),
             (header::CACHE_CONTROL, "no-cache"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         body,
     )
