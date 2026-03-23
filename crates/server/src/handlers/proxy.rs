@@ -28,6 +28,8 @@ pub async fn messages(
     headers: axum::http::HeaderMap,
     body: bytes::Bytes,
 ) -> Result<Response, AppError> {
+    let request_start = std::time::Instant::now();
+
     // Rate limit check
     if let Err(retry_after) = state.rate_limiter.check(&auth.user_id) {
         tracing::warn!(user_id = %auth.user_id, retry_after, "Rate limited");
@@ -149,6 +151,7 @@ pub async fn messages(
             upstream_resp,
             session_ctx,
             user_content,
+            request_start,
         )
         .await;
     }
@@ -161,6 +164,7 @@ pub async fn messages(
         upstream_resp,
         session_ctx,
         user_content,
+        request_start,
     )
     .await
 }
@@ -174,6 +178,7 @@ async fn handle_non_streaming(
     upstream_resp: reqwest::Response,
     session_ctx: Option<storage::SessionContext>,
     user_content: String,
+    request_start: std::time::Instant,
 ) -> Result<Response, AppError> {
     let response_bytes = upstream_resp
         .bytes()
@@ -197,6 +202,8 @@ async fn handle_non_streaming(
     let org_id_ref = session_ctx.as_ref().map(|c| c.org_id.as_deref()).flatten();
     let project_id_ref = session_ctx.as_ref().map(|c| c.project_id.as_str());
 
+    let duration_ms = request_start.elapsed().as_millis() as u64;
+
     spawn_post_request_tasks(
         &state,
         &auth.user_id,
@@ -206,6 +213,7 @@ async fn handle_non_streaming(
         model,
         input_tokens,
         output_tokens,
+        duration_ms,
     );
 
     // Store messages to aura-storage if session context is present
@@ -264,6 +272,7 @@ async fn handle_streaming(
     upstream_resp: reqwest::Response,
     session_ctx: Option<storage::SessionContext>,
     user_content: String,
+    request_start: std::time::Instant,
 ) -> Result<Response, AppError> {
     let model_owned = model.to_string();
     let provider_owned = provider_name.to_string();
@@ -276,6 +285,7 @@ async fn handle_streaming(
     let stream_project_id = session_ctx.as_ref().map(|c| c.project_id.clone());
     tokio::spawn(async move {
         if let Ok(usage) = usage_rx.await {
+            let duration_ms = request_start.elapsed().as_millis() as u64;
             let model = usage.model.as_deref().unwrap_or(&model_owned);
             spawn_post_request_tasks(
                 &billing_state,
@@ -286,6 +296,7 @@ async fn handle_streaming(
                 model,
                 usage.input_tokens,
                 usage.output_tokens,
+                duration_ms,
             );
 
             // Store messages to aura-storage if session context is present
@@ -336,6 +347,7 @@ fn spawn_post_request_tasks(
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
+    duration_ms: u64,
 ) {
     let event_id = uuid::Uuid::new_v4().to_string();
     let model_owned = model.to_string();
@@ -392,6 +404,7 @@ fn spawn_post_request_tasks(
                 input_tokens,
                 output_tokens,
                 (input_tokens + output_tokens) as f64 * 0.00001,
+                duration_ms,
             )
             .await;
         });

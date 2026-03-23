@@ -15,6 +15,7 @@ pub async fn record_usage(
     input_tokens: u64,
     output_tokens: u64,
     cost_usd: f64,
+    duration_ms: u64,
 ) {
     let url = format!("{network_url}/internal/usage");
 
@@ -29,7 +30,8 @@ pub async fn record_usage(
             "model": model,
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,
-            "estimatedCostUsd": cost_usd
+            "estimatedCostUsd": cost_usd,
+            "durationMs": duration_ms
         }))
         .send()
         .await;
