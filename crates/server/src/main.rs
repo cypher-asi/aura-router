@@ -57,10 +57,18 @@ async fn main() -> anyhow::Result<()> {
             .allow_headers(Any),
     };
 
+    let rate_limit_rpm: u32 = std::env::var("RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+
     let state = AppState {
         validator,
         internal_token: InternalToken(internal_token),
         http_client: reqwest::Client::new(),
+        rate_limiter: std::sync::Arc::new(
+            aura_router_proxy::rate_limit::RateLimiter::new(rate_limit_rpm, 60),
+        ),
         anthropic_api_key,
         openai_api_key: std::env::var("OPENAI_API_KEY")
             .ok()

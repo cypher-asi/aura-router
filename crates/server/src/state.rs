@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use aura_router_auth::{InternalToken, TokenValidator};
+use aura_router_proxy::rate_limit::RateLimiter;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -6,6 +9,7 @@ pub struct AppState {
     pub validator: TokenValidator,
     pub internal_token: InternalToken,
     pub http_client: reqwest::Client,
+    pub rate_limiter: Arc<RateLimiter>,
 
     // Provider API keys
     pub anthropic_api_key: String,
