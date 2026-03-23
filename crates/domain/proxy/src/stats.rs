@@ -9,6 +9,8 @@ pub async fn record_usage(
     network_url: &str,
     token: &str,
     user_id: &str,
+    org_id: Option<&str>,
+    project_id: Option<&str>,
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
@@ -20,8 +22,9 @@ pub async fn record_usage(
         .post(&url)
         .header("x-internal-token", token)
         .json(&serde_json::json!({
-            "orgId": null,
+            "orgId": org_id,
             "userId": user_id,
+            "zeroUserId": user_id,
             "agentId": null,
             "model": model,
             "inputTokens": input_tokens,

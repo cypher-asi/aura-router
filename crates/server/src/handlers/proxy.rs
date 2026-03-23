@@ -28,6 +28,28 @@ pub async fn messages(
     headers: axum::http::HeaderMap,
     body: bytes::Bytes,
 ) -> Result<Response, AppError> {
+    // Rate limit check
+    if let Err(retry_after) = state.rate_limiter.check(&auth.user_id) {
+        tracing::warn!(user_id = %auth.user_id, retry_after, "Rate limited");
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (header::RETRY_AFTER, retry_after.to_string()),
+                (header::CONTENT_TYPE, "application/json".to_string()),
+            ],
+            Body::from(
+                serde_json::json!({
+                    "error": {
+                        "code": "RATE_LIMITED",
+                        "message": format!("Too many requests. Retry after {retry_after} seconds.")
+                    }
+                })
+                .to_string(),
+            ),
+        )
+            .into_response());
+    }
+
     // Parse just the model and stream fields from the request body
     let request_value: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON: {e}")))?;
@@ -172,9 +194,14 @@ async fn handle_non_streaming(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
+    let org_id_ref = session_ctx.as_ref().map(|c| c.org_id.as_deref()).flatten();
+    let project_id_ref = session_ctx.as_ref().map(|c| c.project_id.as_str());
+
     spawn_post_request_tasks(
         &state,
         &auth.user_id,
+        org_id_ref,
+        project_id_ref,
         provider_name,
         model,
         input_tokens,
@@ -245,12 +272,16 @@ async fn handle_streaming(
     // Spawn task to handle billing + storage after stream completes
     let billing_state = state.clone();
     let user_id = auth.user_id.clone();
+    let stream_org_id = session_ctx.as_ref().and_then(|c| c.org_id.clone());
+    let stream_project_id = session_ctx.as_ref().map(|c| c.project_id.clone());
     tokio::spawn(async move {
         if let Ok(usage) = usage_rx.await {
             let model = usage.model.as_deref().unwrap_or(&model_owned);
             spawn_post_request_tasks(
                 &billing_state,
                 &user_id,
+                stream_org_id.as_deref(),
+                stream_project_id.as_deref(),
                 &provider_owned,
                 model,
                 usage.input_tokens,
@@ -299,6 +330,8 @@ async fn handle_streaming(
 fn spawn_post_request_tasks(
     state: &AppState,
     user_id: &str,
+    org_id: Option<&str>,
+    project_id: Option<&str>,
     provider_name: &str,
     model: &str,
     input_tokens: u64,
@@ -308,6 +341,8 @@ fn spawn_post_request_tasks(
     let model_owned = model.to_string();
     let user_id_owned = user_id.to_string();
     let provider_owned = provider_name.to_string();
+    let org_id_owned = org_id.map(String::from);
+    let project_id_owned = project_id.map(String::from);
 
     // Debit z-billing
     {
@@ -351,6 +386,8 @@ fn spawn_post_request_tasks(
                 &url,
                 &token,
                 &user_id,
+                org_id_owned.as_deref(),
+                project_id_owned.as_deref(),
                 &model,
                 input_tokens,
                 output_tokens,
