@@ -149,7 +149,7 @@ LLM Provider (api.anthropic.com / api.openai.com)
 |---|---|
 | z-billing | `POST /v1/usage/check` (pre-check), `POST /v1/usage` (debit) via `X-API-Key` |
 | aura-network | `POST /internal/usage` via `X-Internal-Token` |
-| aura-storage | `POST /internal/messages` via `X-Internal-Token` |
+| aura-storage | `POST /internal/events` via `X-Internal-Token` |
 
 ---
 

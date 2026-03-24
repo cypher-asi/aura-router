@@ -238,7 +238,7 @@ async fn handle_non_streaming(
             let token = storage_token.clone();
             let user_id = auth.user_id.clone();
             tokio::spawn(async move {
-                storage::store_messages(
+                storage::store_events(
                     &client,
                     &url,
                     &token,
@@ -305,7 +305,7 @@ async fn handle_streaming(
                     &billing_state.aura_storage_url,
                     &billing_state.aura_storage_token,
                 ) {
-                    storage::store_messages(
+                    storage::store_events(
                         &billing_state.http_client,
                         storage_url,
                         storage_token,

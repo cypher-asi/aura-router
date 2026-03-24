@@ -66,9 +66,10 @@ async fn main() -> anyhow::Result<()> {
         validator,
         internal_token: InternalToken(internal_token),
         http_client: reqwest::Client::new(),
-        rate_limiter: std::sync::Arc::new(
-            aura_router_proxy::rate_limit::RateLimiter::new(rate_limit_rpm, 60),
-        ),
+        rate_limiter: std::sync::Arc::new(aura_router_proxy::rate_limit::RateLimiter::new(
+            rate_limit_rpm,
+            60,
+        )),
         anthropic_api_key,
         openai_api_key: std::env::var("OPENAI_API_KEY")
             .ok()

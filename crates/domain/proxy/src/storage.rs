@@ -1,6 +1,6 @@
-//! aura-storage message recording client.
+//! aura-storage event recording client.
 //!
-//! Stores LLM prompts and responses to aura-storage for conversation history.
+//! Stores LLM prompts and responses as session events to aura-storage.
 //! Requires session context headers from the client (X-Aura-Session-Id, etc.).
 
 /// Context headers from the client request, used for storage recording.
@@ -42,11 +42,11 @@ impl SessionContext {
     }
 }
 
-/// Store a user prompt and assistant response to aura-storage (fire-and-forget).
+/// Store a user prompt and assistant response as session events (fire-and-forget).
 ///
-/// Calls POST /internal/messages for each message.
+/// Calls POST /internal/events for each event.
 /// Errors are logged but do not block the response.
-pub async fn store_messages(
+pub async fn store_events(
     client: &reqwest::Client,
     storage_url: &str,
     token: &str,
@@ -58,66 +58,76 @@ pub async fn store_messages(
     input_tokens: u64,
     output_tokens: u64,
 ) {
-    let url = format!("{storage_url}/internal/messages");
+    let url = format!("{storage_url}/internal/events");
 
-    // Store user prompt
+    // Store user prompt as event
     let user_result = client
         .post(&url)
         .header("x-internal-token", token)
         .json(&serde_json::json!({
             "sessionId": ctx.session_id,
-            "projectAgentId": ctx.project_agent_id,
+            "userId": user_id,
+            "agentId": ctx.project_agent_id,
+            "sender": "user",
             "projectId": ctx.project_id,
             "orgId": ctx.org_id,
-            "createdBy": user_id,
-            "role": "user",
-            "content": user_content,
-            "inputTokens": null,
-            "outputTokens": null
+            "type": "message_saved",
+            "content": {
+                "role": "user",
+                "text": user_content
+            }
         }))
         .send()
         .await;
 
     match user_result {
         Ok(resp) if resp.status().is_success() => {
-            tracing::debug!("User message stored to aura-storage");
+            tracing::debug!("User event stored to aura-storage");
         }
         Ok(resp) => {
-            tracing::warn!(status = %resp.status(), "Failed to store user message");
+            tracing::warn!(status = %resp.status(), "Failed to store user event");
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to reach aura-storage for user message");
+            tracing::warn!(error = %e, "Failed to reach aura-storage for user event");
         }
     }
 
-    // Store assistant response
+    // Store assistant response as event
+    let mut content = serde_json::json!({
+        "role": "assistant",
+        "text": assistant_content,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens
+    });
+
+    if let Some(thinking_text) = thinking {
+        content["thinking"] = serde_json::Value::String(thinking_text.to_string());
+    }
+
     let assistant_result = client
         .post(&url)
         .header("x-internal-token", token)
         .json(&serde_json::json!({
             "sessionId": ctx.session_id,
-            "projectAgentId": ctx.project_agent_id,
+            "agentId": ctx.project_agent_id,
+            "sender": "agent",
             "projectId": ctx.project_id,
             "orgId": ctx.org_id,
-            "createdBy": null,
-            "role": "assistant",
-            "content": assistant_content,
-            "thinking": thinking,
-            "inputTokens": input_tokens as i32,
-            "outputTokens": output_tokens as i32
+            "type": "message_saved",
+            "content": content
         }))
         .send()
         .await;
 
     match assistant_result {
         Ok(resp) if resp.status().is_success() => {
-            tracing::debug!("Assistant message stored to aura-storage");
+            tracing::debug!("Assistant event stored to aura-storage");
         }
         Ok(resp) => {
-            tracing::warn!(status = %resp.status(), "Failed to store assistant message");
+            tracing::warn!(status = %resp.status(), "Failed to store assistant event");
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to reach aura-storage for assistant message");
+            tracing::warn!(error = %e, "Failed to reach aura-storage for assistant event");
         }
     }
 }

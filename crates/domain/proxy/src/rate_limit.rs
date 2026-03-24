@@ -37,9 +37,7 @@ impl RateLimiter {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
 
-        let entry = state
-            .entry(user_id.to_string())
-            .or_insert((0, now));
+        let entry = state.entry(user_id.to_string()).or_insert((0, now));
 
         // Reset window if expired
         if now.duration_since(entry.1).as_secs() >= self.window_secs {
