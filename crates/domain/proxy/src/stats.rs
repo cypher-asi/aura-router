@@ -27,6 +27,7 @@ pub async fn record_usage(
             "userId": user_id,
             "zeroUserId": user_id,
             "agentId": null,
+            "projectId": project_id,
             "model": model,
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,

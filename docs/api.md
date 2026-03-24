@@ -226,7 +226,7 @@ aura-router communicates with three backend services. The pre-check call is sync
 
 | Operation | Method | Endpoint | Timing |
 |-----------|--------|----------|--------|
-| Record usage stats | POST | `/internal/usage` | Background (fire-and-forget) |
+| Record usage stats | POST | `/internal/usage` | Background (fire-and-forget). Sends `orgId`, `projectId`, `zeroUserId`, `durationMs`. |
 
 ### aura-storage
 
