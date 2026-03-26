@@ -62,6 +62,24 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(60);
 
+    // Initialize S3 config for image generation (optional)
+    let s3_config = aura_router_proxy::s3::S3Config::from_env().await;
+    if s3_config.is_some() {
+        tracing::info!("S3 configured for image generation");
+    }
+
+    // Load watermark image (optional)
+    let watermark_bytes = std::env::var("WATERMARK_PATH")
+        .ok()
+        .and_then(|path| std::fs::read(&path).ok())
+        .or_else(|| {
+            // Try default path
+            std::fs::read("assets/watermark.png").ok()
+        });
+    if watermark_bytes.is_some() {
+        tracing::info!("Watermark image loaded");
+    }
+
     let state = AppState {
         validator,
         internal_token: InternalToken(internal_token),
@@ -72,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
         )),
         anthropic_api_key,
         openai_api_key: std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        google_api_key: std::env::var("GOOGLE_API_KEY")
             .ok()
             .filter(|s| !s.is_empty()),
         z_billing_url,
@@ -88,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
         aura_storage_token: std::env::var("AURA_STORAGE_TOKEN")
             .ok()
             .filter(|s| !s.is_empty()),
+        s3_config,
+        watermark_bytes,
     };
 
     let app = router::create_router()

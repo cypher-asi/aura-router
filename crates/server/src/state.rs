@@ -14,6 +14,7 @@ pub struct AppState {
     // Provider API keys
     pub anthropic_api_key: String,
     pub openai_api_key: Option<String>,
+    pub google_api_key: Option<String>,
 
     // Service URLs
     pub z_billing_url: String,
@@ -22,6 +23,10 @@ pub struct AppState {
     pub aura_network_token: Option<String>,
     pub aura_storage_url: Option<String>,
     pub aura_storage_token: Option<String>,
+
+    // Image generation
+    pub s3_config: Option<aura_router_proxy::s3::S3Config>,
+    pub watermark_bytes: Option<Vec<u8>>,
 }
 
 impl AsRef<TokenValidator> for AppState {

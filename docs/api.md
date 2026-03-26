@@ -262,6 +262,118 @@ aura-router communicates with three backend services. The pre-check call is sync
 
 ---
 
+## Image Generation
+
+### POST /v1/generate-image
+
+Generate an image using OpenAI or Gemini. Returns S3 URLs for watermarked and original images.
+
+**Authentication:** JWT (required)
+
+**Request body:**
+
+```json
+{
+  "prompt": "string (required)",
+  "size": "1024x1024 | 1536x1024 | 1024x1536 | 256x256 | 512x512 | auto (default: 1024x1024)",
+  "model": "gpt-image-1 | dall-e-3 | dall-e-2 | gemini-nano-banana (default: gpt-image-1)",
+  "images": ["url or base64 data URL"] (optional, reference images)
+}
+```
+
+**Response:** `200 OK`
+
+```json
+{
+  "success": true,
+  "imageUrl": "https://aura-images.s3...watermarked.png",
+  "originalUrl": "https://aura-images.s3...original.png",
+  "meta": {
+    "model": "gpt-image-1",
+    "size": "1024x1024",
+    "prompt": "original prompt",
+    "provider": "openai",
+    "created": 1711234567
+  }
+}
+```
+
+A style lock prompt is automatically appended to all generation requests for consistent product render output.
+
+**Billing:** Flat per-generation cost (500 credits for GPT-Image-1, 400 for DALL-E 3, 200 for DALL-E 2, 300 for Gemini).
+
+---
+
+### POST /v1/generate-image/stream
+
+Same as above but returns SSE stream with progress and partial image events.
+
+**Authentication:** JWT (required)
+
+**Request body:** Same as `POST /v1/generate-image`
+
+**Response:** SSE stream (`text/event-stream`)
+
+Events:
+
+```
+data: {"type":"start","ts":"2026-03-26T10:00:00Z"}
+
+data: {"type":"progress","percent":10,"message":"Generating image..."}
+
+data: {"type":"partial-image","data":"data:image/png;base64,..."}
+
+data: {"type":"progress","percent":50,"message":"Refining..."}
+
+data: {"type":"completed","imageUrl":"https://...","originalUrl":"https://...","meta":{...}}
+```
+
+Error event:
+```
+data: {"type":"error","code":"GENERATION_FAILED","message":"..."}
+```
+
+---
+
+### GET /v1/generate-image/config
+
+Returns available image generation models and estimated generation times.
+
+**Authentication:** JWT (required)
+
+**Response:** `200 OK`
+
+```json
+{
+  "defaultModel": "gpt-image-1",
+  "models": [
+    {
+      "id": "gpt-image-1",
+      "name": "GPT Image 1",
+      "provider": "openai",
+      "etaMs": 20000,
+      "supportsReferences": true
+    },
+    {
+      "id": "dall-e-3",
+      "name": "DALL-E 3",
+      "provider": "openai",
+      "etaMs": 15000,
+      "supportsReferences": false
+    },
+    {
+      "id": "gemini-nano-banana",
+      "name": "Gemini Flash Image",
+      "provider": "google",
+      "etaMs": 25000,
+      "supportsReferences": true
+    }
+  ]
+}
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -279,5 +391,11 @@ aura-router communicates with three backend services. The pre-check call is sync
 | `AURA_NETWORK_TOKEN` | No | — | Internal service token for aura-network |
 | `AURA_STORAGE_URL` | No | — | aura-storage base URL for event recording |
 | `AURA_STORAGE_TOKEN` | No | — | Internal service token for aura-storage |
+| `GOOGLE_API_KEY` | No | — | Google API key (required for Gemini image generation) |
+| `S3_BUCKET_NAME` | No | — | S3 bucket for image uploads (required for image generation) |
+| `AWS_REGION` | No | `us-east-1` | AWS region for S3 |
+| `AWS_ACCESS_KEY_ID` | No | — | AWS credentials for S3 (required for image generation) |
+| `AWS_SECRET_ACCESS_KEY` | No | — | AWS credentials for S3 (required for image generation) |
+| `WATERMARK_PATH` | No | `assets/watermark.png` | Path to watermark image file |
 | `CORS_ORIGINS` | No | — | Comma-separated list of allowed CORS origins |
 | `RATE_LIMIT_RPM` | No | `60` | Maximum requests per minute per user |

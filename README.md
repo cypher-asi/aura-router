@@ -81,6 +81,16 @@ Both RS256 (Auth0 JWKS) and HS256 (shared secret) tokens are accepted — same t
 |---|---|---|---|
 | POST | `/v1/messages` | Proxy LLM request | JWT |
 
+### Image Generation
+
+| Method | Path | Description | Auth |
+|---|---|---|---|
+| POST | `/v1/generate-image` | Generate image (non-streaming) | JWT |
+| POST | `/v1/generate-image/stream` | Generate image (SSE streaming with partial images) | JWT |
+| GET | `/v1/generate-image/config` | Available models + ETAs | JWT |
+
+Supports GPT-Image-1, DALL-E 3/2 (OpenAI) and Gemini nano-banana (Google). Images uploaded to S3 with watermark. Flat per-generation billing. Requires `S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` env vars.
+
 The `/v1/messages` endpoint accepts Anthropic-compatible request bodies. The router resolves the provider from the `model` field and forwards accordingly.
 
 **Supported models:**

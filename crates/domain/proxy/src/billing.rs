@@ -67,6 +67,53 @@ pub async fn check_credits(
         .map_err(|e| AppError::BillingError(format!("z-billing response parse error: {e}")))
 }
 
+/// Report image generation usage and debit a flat cost.
+pub async fn report_image_usage(
+    client: &reqwest::Client,
+    billing_url: &str,
+    api_key: &str,
+    event_id: &str,
+    user_id: &str,
+    provider: &str,
+    model: &str,
+    cost_cents: i64,
+) -> Result<UsageResponse, AppError> {
+    let url = format!("{billing_url}/v1/usage");
+
+    let resp = client
+        .post(&url)
+        .header("x-api-key", api_key)
+        .header("x-service-name", "aura-router")
+        .json(&serde_json::json!({
+            "event_id": event_id,
+            "user_id": user_id,
+            "cost_cents": cost_cents,
+            "metric": {
+                "type": "llm_tokens",
+                "provider": provider,
+                "model": model,
+                "input_tokens": 0,
+                "output_tokens": 0
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::BillingError(format!("z-billing unreachable: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(status = %status, body = %body, "z-billing image usage report failed");
+        return Err(AppError::BillingError(format!(
+            "z-billing usage report failed ({status})"
+        )));
+    }
+
+    resp.json::<UsageResponse>()
+        .await
+        .map_err(|e| AppError::BillingError(format!("z-billing response parse error: {e}")))
+}
+
 /// Report LLM usage and debit credits.
 pub async fn report_usage(
     client: &reqwest::Client,

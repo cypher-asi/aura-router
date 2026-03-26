@@ -1,6 +1,8 @@
 pub mod billing;
+pub mod image_gen;
 pub mod providers;
 pub mod rate_limit;
+pub mod s3;
 pub mod stats;
 pub mod storage;
 pub mod stream;

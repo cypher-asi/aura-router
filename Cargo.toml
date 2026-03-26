@@ -20,10 +20,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 dotenvy = "0.15"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 jsonwebtoken = "9"
 bytes = "1"
 futures-util = "0.3"
+base64 = "0.22"
+aws-config = "1"
+aws-sdk-s3 = "1"
+image = "0.25"
+async-stream = "0.3"
 
 # Internal crates
 aura-router-core = { path = "crates/core" }

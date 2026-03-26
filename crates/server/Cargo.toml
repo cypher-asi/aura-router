@@ -26,3 +26,5 @@ anyhow = "1"
 reqwest = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+base64 = { workspace = true }
+async-stream = { workspace = true }
