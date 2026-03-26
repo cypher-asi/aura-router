@@ -7,6 +7,8 @@
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
+use crate::providers;
+
 /// Token usage extracted from an SSE stream.
 #[derive(Debug, Default)]
 pub struct StreamUsage {
@@ -35,16 +37,19 @@ pub fn proxy_stream(
         inner: Box::pin(byte_stream),
         parser: SseParser::new(),
         usage_tx: Some(usage_tx),
+        finished: false,
     };
 
     (tee_stream, usage_rx)
 }
 
 /// A stream that passes bytes through while parsing SSE events for billing.
+/// Injects an `x_context_usage` SSE event at the end of the stream with context usage data.
 struct TeeStream<S> {
     inner: std::pin::Pin<Box<S>>,
     parser: SseParser,
     usage_tx: Option<oneshot::Sender<StreamUsage>>,
+    finished: bool,
 }
 
 impl<S> futures_util::Stream for TeeStream<S>
@@ -57,6 +62,10 @@ where
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
+        if self.finished {
+            return std::task::Poll::Ready(None);
+        }
+
         match self.inner.as_mut().poll_next(cx) {
             std::task::Poll::Ready(Some(Ok(bytes))) => {
                 // Feed bytes to the billing parser
@@ -65,11 +74,28 @@ where
             }
             std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(e))),
             std::task::Poll::Ready(None) => {
-                // Stream ended — send final usage
+                // Stream ended — build context usage event and send final usage
+                self.finished = true;
+
+                let usage = self.parser.finalize();
+                let model = usage.model.as_deref().unwrap_or("unknown");
+                let max_tokens = providers::max_context_tokens(model);
+                let context_usage = if max_tokens > 0 {
+                    usage.input_tokens as f64 / max_tokens as f64
+                } else {
+                    0.0
+                };
+
+                let event = format!(
+                    "event: x_context_usage\ndata: {{\"contextUsage\":{context_usage:.4},\"inputTokens\":{},\"outputTokens\":{},\"maxTokens\":{max_tokens}}}\n\n",
+                    usage.input_tokens, usage.output_tokens
+                );
+
                 if let Some(tx) = self.usage_tx.take() {
-                    let _ = tx.send(self.parser.finalize());
+                    let _ = tx.send(usage);
                 }
-                std::task::Poll::Ready(None)
+
+                std::task::Poll::Ready(Some(Ok(Bytes::from(event))))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }

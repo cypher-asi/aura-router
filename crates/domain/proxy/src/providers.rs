@@ -43,6 +43,29 @@ pub fn provider_url(provider: &Provider) -> &'static str {
     }
 }
 
+/// Get the maximum context window size for a model (in tokens).
+pub fn max_context_tokens(model: &str) -> u64 {
+    match model {
+        // Anthropic
+        m if m.starts_with("claude-opus-4") => 1_000_000,
+        m if m.starts_with("claude-sonnet-4") => 1_000_000,
+        m if m.starts_with("claude-haiku-4") => 200_000,
+        m if m.starts_with("claude-3-5") => 200_000,
+        m if m.starts_with("claude-3") => 200_000,
+        m if m.starts_with("claude") => 200_000,
+        // OpenAI
+        m if m.starts_with("gpt-4o") => 128_000,
+        m if m.starts_with("gpt-4-turbo") => 128_000,
+        m if m.starts_with("gpt-4") => 8_192,
+        m if m.starts_with("gpt-3.5") => 16_385,
+        m if m.starts_with("o1") => 200_000,
+        m if m.starts_with("o3") => 200_000,
+        m if m.starts_with("o4") => 200_000,
+        m if m.starts_with("codex") => 200_000,
+        _ => 200_000, // safe default
+    }
+}
+
 /// Build provider-specific headers for the upstream request.
 ///
 /// Returns None if the API key contains invalid header characters.

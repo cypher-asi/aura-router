@@ -100,11 +100,22 @@ OpenAI routing requires the `OPENAI_API_KEY` environment variable to be configur
 
 When `stream` is `false` (or omitted), the provider's full JSON response is returned as-is.
 
-**Content-Type:** `application/json`
+**Response headers:**
+
+```
+Content-Type: application/json
+X-Context-Usage: 0.4532
+X-Model-Max-Tokens: 200000
+```
+
+| Header | Description |
+|--------|-------------|
+| `X-Context-Usage` | Float (0-1) representing how much of the model's context window has been consumed. Calculated from `input_tokens / max_context_tokens`. |
+| `X-Model-Max-Tokens` | Maximum context window size for the model (in tokens). |
 
 #### Streaming Response
 
-When `stream` is `true`, the provider's SSE stream is forwarded to the client untouched.
+When `stream` is `true`, the provider's SSE stream is forwarded to the client with context usage appended.
 
 **Response headers:**
 
@@ -112,9 +123,24 @@ When `stream` is `true`, the provider's SSE stream is forwarded to the client un
 Content-Type: text/event-stream
 Cache-Control: no-cache
 X-Accel-Buffering: no
+X-Model-Max-Tokens: 200000
 ```
 
-Each event follows the standard SSE format (`data: {...}\n\n`). The final event is `data: [DONE]`.
+Each event follows the standard SSE format (`data: {...}\n\n`). The final provider event is `data: [DONE]`.
+
+After the provider stream ends, the router appends a custom `x_context_usage` event:
+
+```
+event: x_context_usage
+data: {"contextUsage":0.4532,"inputTokens":90640,"outputTokens":1500,"maxTokens":200000}
+```
+
+| Field | Description |
+|-------|-------------|
+| `contextUsage` | Float (0-1) representing context window consumption. |
+| `inputTokens` | Total input tokens for this request. |
+| `outputTokens` | Total output tokens generated. |
+| `maxTokens` | Maximum context window for the model. |
 
 #### Request Flow
 

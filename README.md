@@ -96,9 +96,13 @@ The `/v1/messages` endpoint accepts Anthropic-compatible request bodies. The rou
 6. Record usage to aura-network (stats)
 7. Store messages to aura-storage (if session context headers present)
 
-**Streaming:** Set `"stream": true` in the request body. Response streams as `text/event-stream` (SSE). Token counts are captured from the stream for billing.
+**Streaming:** Set `"stream": true` in the request body. Response streams as `text/event-stream` (SSE). Token counts are captured from the stream for billing. A custom `x_context_usage` SSE event is appended at the end of the stream with context usage data.
 
-**Session context headers (optional, for message storage):**
+**Context usage headers:** Every response includes context window usage information:
+- Non-streaming: `X-Context-Usage` header (float 0-1) + `X-Model-Max-Tokens` header
+- Streaming: `X-Model-Max-Tokens` header + `x_context_usage` SSE event at end of stream
+
+**Session context headers (optional, for event storage):**
 - `X-Aura-Session-Id` — Session UUID
 - `X-Aura-Agent-Id` — Project agent UUID
 - `X-Aura-Project-Id` — Project UUID

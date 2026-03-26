@@ -255,9 +255,26 @@ async fn handle_non_streaming(
         }
     }
 
+    let max_tokens = providers::max_context_tokens(model);
+    let context_usage = if max_tokens > 0 {
+        input_tokens as f64 / max_tokens as f64
+    } else {
+        0.0
+    };
+
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (
+                header::HeaderName::from_static("x-context-usage"),
+                format!("{context_usage:.4}"),
+            ),
+            (
+                header::HeaderName::from_static("x-model-max-tokens"),
+                max_tokens.to_string(),
+            ),
+        ],
         Body::from(response_bytes),
     )
         .into_response())
@@ -323,14 +340,22 @@ async fn handle_streaming(
         }
     });
 
+    let max_tokens = providers::max_context_tokens(model);
     let body = Body::from_stream(tee_stream);
 
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/event-stream"),
-            (header::CACHE_CONTROL, "no-cache"),
-            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+            (header::CONTENT_TYPE, "text/event-stream".to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (
+                header::HeaderName::from_static("x-accel-buffering"),
+                "no".to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-model-max-tokens"),
+                max_tokens.to_string(),
+            ),
         ],
         body,
     )
