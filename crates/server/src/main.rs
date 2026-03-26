@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let app = router::create_router()
         .with_state(state)
         .layer(cors)
-        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB
+        .layer(RequestBodyLimitLayer::new(25 * 1024 * 1024)) // 25MB (images)
         .layer(tower::limit::ConcurrencyLimitLayer::new(512))
         .layer(TraceLayer::new_for_http());
 

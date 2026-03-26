@@ -48,7 +48,7 @@ Anthropic-compatible LLM proxy. Authenticates the caller, verifies credit balanc
 
 **Content-Type:** `application/json`
 
-**Body size limit:** 10 MB (will increase to 25 MB when image support lands)
+**Body size limit:** 25 MB (supports image content blocks)
 
 #### Request Body
 
