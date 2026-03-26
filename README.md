@@ -69,54 +69,7 @@ Both RS256 (Auth0 JWKS) and HS256 (shared secret) tokens are accepted — same t
 
 ## API Reference
 
-### Health
-
-| Method | Path | Description | Auth |
-|---|---|---|---|
-| GET | `/health` | Liveness check | None |
-
-### LLM Proxy
-
-| Method | Path | Description | Auth |
-|---|---|---|---|
-| POST | `/v1/messages` | Proxy LLM request | JWT |
-
-### Image Generation
-
-| Method | Path | Description | Auth |
-|---|---|---|---|
-| POST | `/v1/generate-image` | Generate image (non-streaming) | JWT |
-| POST | `/v1/generate-image/stream` | Generate image (SSE streaming with partial images) | JWT |
-| GET | `/v1/generate-image/config` | Available models + ETAs | JWT |
-
-Supports GPT-Image-1, DALL-E 3/2 (OpenAI) and Gemini nano-banana (Google). Images uploaded to S3 with watermark. Flat per-generation billing. Requires `S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` env vars.
-
-The `/v1/messages` endpoint accepts Anthropic-compatible request bodies. The router resolves the provider from the `model` field and forwards accordingly.
-
-**Supported models:**
-- Anthropic: `claude-*` (e.g., `claude-sonnet-4-6`, `claude-opus-4-6`)
-- OpenAI: `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `codex-*` (requires `OPENAI_API_KEY`)
-
-**Request flow:**
-1. Authenticate via JWT (`Authorization: Bearer <token>`)
-2. Check credits via z-billing (pre-flight balance check)
-3. Forward to LLM provider with platform API key
-4. Stream or return response to client
-5. Debit credits via z-billing (post-completion)
-6. Record usage to aura-network (stats)
-7. Store messages to aura-storage (if session context headers present)
-
-**Streaming:** Set `"stream": true` in the request body. Response streams as `text/event-stream` (SSE). Token counts are captured from the stream for billing. A custom `x_context_usage` SSE event is appended at the end of the stream with context usage data.
-
-**Context usage headers:** Every response includes context window usage information:
-- Non-streaming: `X-Context-Usage` header (float 0-1) + `X-Model-Max-Tokens` header
-- Streaming: `X-Model-Max-Tokens` header + `x_context_usage` SSE event at end of stream
-
-**Session context headers (optional, for event storage):**
-- `X-Aura-Session-Id` — Session UUID
-- `X-Aura-Agent-Id` — Project agent UUID
-- `X-Aura-Project-Id` — Project UUID
-- `X-Aura-Org-Id` — Organization UUID
+See [docs/api.md](docs/api.md) for the full API reference.
 
 ---
 
@@ -141,29 +94,6 @@ aura-router
     v
 LLM Provider (api.anthropic.com / api.openai.com)
 ```
-
-### Error Handling
-
-| Failure | Response |
-|---|---|
-| Invalid/missing JWT | 401 Unauthorized |
-| Insufficient credits | 402 Payment Required |
-| Rate limited | 429 Too Many Requests (with Retry-After header) |
-| Unsupported model | 400 Bad Request |
-| z-billing unreachable | 503 Service Unavailable |
-| Provider unreachable | 502 Bad Gateway |
-| Provider error (429, 500, etc.) | Passthrough (same status) |
-| aura-network/storage unreachable | Logged, response not affected |
-
----
-
-## Cross-Service Integration
-
-| Service | How aura-router calls it |
-|---|---|
-| z-billing | `POST /v1/usage/check` (pre-check), `POST /v1/usage` (debit) via `X-API-Key` |
-| aura-network | `POST /internal/usage` via `X-Internal-Token` |
-| aura-storage | `POST /internal/events` via `X-Internal-Token` |
 
 ---
 
