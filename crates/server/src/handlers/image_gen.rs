@@ -63,7 +63,7 @@ pub async fn generate_image(
 
     // Resolve model + provider
     let (model, provider) =
-        image_gen::resolve_image_model(input.model.as_deref());
+        image_gen::resolve_image_model(input.model.as_deref(), input.prompt_mode.as_deref());
 
     // Generate image
     let generated = match provider {
@@ -78,6 +78,7 @@ pub async fn generate_image(
                 &input.prompt,
                 &input.size,
                 input.images.as_deref(),
+                input.is_iteration,
             )
             .await
             .map_err(|e| AppError::ProviderError(e))?
@@ -94,6 +95,7 @@ pub async fn generate_image(
                 &input.size,
                 model,
                 input.images.as_deref(),
+                input.is_iteration,
             )
             .await
             .map_err(|e| AppError::ProviderError(e))?
@@ -226,9 +228,10 @@ pub async fn generate_image_stream(
         });
     }
 
-    let (model, provider) = image_gen::resolve_image_model(input.model.as_deref());
+    let (model, provider) = image_gen::resolve_image_model(input.model.as_deref(), input.prompt_mode.as_deref());
     let model_owned = model.to_string();
     let provider_owned = provider.to_string();
+    let is_iteration = input.is_iteration;
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<image_gen::ImageStreamEvent>(32);
 
@@ -276,6 +279,7 @@ pub async fn generate_image_stream(
                 &gen_prompt,
                 &gen_size,
                 gen_images.as_deref(),
+                is_iteration,
             )
             .await
             {
@@ -319,6 +323,7 @@ pub async fn generate_image_stream(
                 &gen_size,
                 &gen_model,
                 gen_images.as_deref(),
+                is_iteration,
                 event_tx_clone.clone(),
             )
             .await

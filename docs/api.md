@@ -277,7 +277,9 @@ Generate an image using OpenAI or Gemini. Returns S3 URLs for watermarked and or
   "prompt": "string (required)",
   "size": "1024x1024 | 1536x1024 | 1024x1536 | 256x256 | 512x512 | auto (default: 1024x1024)",
   "model": "gpt-image-1 | dall-e-3 | dall-e-2 | gemini-nano-banana (default: gpt-image-1)",
-  "images": ["url or base64 data URL"] (optional, reference images)
+  "images": ["url or base64 data URL"] (optional, reference images),
+  "promptMode": "new | remix | edit (optional — overrides model selection: new/remix → gpt-image-1, edit → gemini)",
+  "isIteration": "boolean (default: false — when true, style lock prompt is not appended)"
 }
 ```
 

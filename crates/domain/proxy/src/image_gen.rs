@@ -15,6 +15,9 @@ pub struct GenerateImageRequest {
     pub size: String,
     pub model: Option<String>,
     pub images: Option<Vec<ImageInput>>,
+    pub prompt_mode: Option<String>,
+    #[serde(default)]
+    pub is_iteration: bool,
 }
 
 fn default_size() -> String {
@@ -122,8 +125,13 @@ pub async fn generate_openai(
     size: &str,
     model: &str,
     images: Option<&[ImageInput]>,
+    is_iteration: bool,
 ) -> Result<GeneratedImage, String> {
-    let full_prompt = format!("{prompt}{STYLE_LOCK}");
+    let full_prompt = if should_apply_style_lock(is_iteration) {
+        format!("{prompt}{STYLE_LOCK}")
+    } else {
+        prompt.to_string()
+    };
     let has_images = images.map_or(false, |imgs| !imgs.is_empty());
 
     if has_images {
@@ -240,8 +248,13 @@ pub async fn generate_gemini(
     prompt: &str,
     size: &str,
     images: Option<&[ImageInput]>,
+    is_iteration: bool,
 ) -> Result<GeneratedImage, String> {
-    let full_prompt = format!("{prompt}{STYLE_LOCK}");
+    let full_prompt = if should_apply_style_lock(is_iteration) {
+        format!("{prompt}{STYLE_LOCK}")
+    } else {
+        prompt.to_string()
+    };
 
     // Add size instruction
     let size_instruction = match size {
@@ -425,9 +438,14 @@ pub async fn generate_openai_stream(
     size: &str,
     model: &str,
     images: Option<&[ImageInput]>,
+    is_iteration: bool,
     event_tx: tokio::sync::mpsc::Sender<ImageStreamEvent>,
 ) -> Result<GeneratedImage, String> {
-    let full_prompt = format!("{prompt}{STYLE_LOCK}");
+    let full_prompt = if should_apply_style_lock(is_iteration) {
+        format!("{prompt}{STYLE_LOCK}")
+    } else {
+        prompt.to_string()
+    };
     let has_images = images.map_or(false, |imgs| !imgs.is_empty());
 
     // Send start event
@@ -575,12 +593,31 @@ pub async fn generate_openai_stream(
 }
 
 /// Resolve which provider/model to use.
-pub fn resolve_image_model(model: Option<&str>) -> (&str, &str) {
+/// If promptMode is set, it overrides explicit model selection (matching original AURA):
+/// - "new" or "remix" → gpt-image-1
+/// - "edit" → gemini-nano-banana
+pub fn resolve_image_model(model: Option<&str>, prompt_mode: Option<&str>) -> (&'static str, &'static str) {
+    // promptMode takes precedence if set
+    if let Some(mode) = prompt_mode {
+        return match mode {
+            "new" | "remix" => ("gpt-image-1", "openai"),
+            "edit" => ("gemini-nano-banana", "google"),
+            _ => ("gpt-image-1", "openai"),
+        };
+    }
+
     match model {
         Some("gemini-nano-banana") | Some("gemini") => ("gemini-nano-banana", "google"),
         Some("dall-e-3") => ("dall-e-3", "openai"),
         Some("dall-e-2") => ("dall-e-2", "openai"),
-        Some(m) if m.starts_with("gpt") => (m, "openai"),
+        Some("gpt-image-1") => ("gpt-image-1", "openai"),
+        Some("gpt-4o") => ("gpt-4o", "openai"),
         _ => ("gpt-image-1", "openai"),
     }
+}
+
+/// Whether to apply the style lock prompt.
+/// Style lock is NOT applied on iterations (matching original AURA).
+pub fn should_apply_style_lock(is_iteration: bool) -> bool {
+    !is_iteration
 }
