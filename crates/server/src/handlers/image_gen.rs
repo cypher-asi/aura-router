@@ -50,7 +50,7 @@ pub async fn generate_image(
         &state.z_billing_url,
         &state.z_billing_api_key,
         &auth.user_id,
-        100, // image generation minimum: 100 credits ($1)
+        20, // image generation minimum: 20 credits ($0.20)
     )
     .await?;
 
@@ -134,11 +134,11 @@ pub async fn generate_image(
 
     // Debit credits (fire-and-forget) — flat cost per generation
     let cost_cents = match model {
-        "gpt-image-1" => 500,          // $5.00
-        "dall-e-3" => 400,             // $4.00
-        "dall-e-2" => 200,             // $2.00
-        "gemini-nano-banana" => 300,   // $3.00
-        _ => 500,                      // default
+        "gpt-image-1" => 20,           // $0.20
+        "dall-e-3" => 15,              // $0.15
+        "dall-e-2" => 5,               // $0.05
+        "gemini-nano-banana" => 10,    // $0.10
+        _ => 20,                       // default
     };
     {
         let client = state.http_client.clone();
@@ -382,11 +382,11 @@ pub async fn generate_image_stream(
 
         // Debit credits
         let cost_cents = match gen_model.as_str() {
-            "gpt-image-1" => 500,
-            "dall-e-3" => 400,
-            "dall-e-2" => 200,
-            "gemini-nano-banana" => 300,
-            _ => 500,
+            "gpt-image-1" => 20,           // $0.20
+            "dall-e-3" => 15,              // $0.15
+            "dall-e-2" => 5,               // $0.05
+            "gemini-nano-banana" => 10,    // $0.10
+            _ => 20,                       // default
         };
         let _ = billing::report_image_usage(
             &gen_state.http_client,

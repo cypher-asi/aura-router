@@ -300,7 +300,7 @@ Generate an image using OpenAI or Gemini. Returns S3 URLs for watermarked and or
 
 A style lock prompt is automatically appended to all generation requests for consistent product render output.
 
-**Billing:** Flat per-generation cost (500 credits for GPT-Image-1, 400 for DALL-E 3, 200 for DALL-E 2, 300 for Gemini).
+**Billing:** Flat per-generation cost (20 credits/$0.20 for GPT-Image-1, 15/$0.15 for DALL-E 3, 5/$0.05 for DALL-E 2, 10/$0.10 for Gemini).
 
 ---
 
