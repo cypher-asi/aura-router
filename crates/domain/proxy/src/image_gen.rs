@@ -145,7 +145,6 @@ async fn generate_openai_create(
         "model": model,
         "prompt": prompt,
         "size": size,
-        "response_format": "b64_json",
         "n": 1
     });
 
@@ -196,7 +195,6 @@ async fn generate_openai_edit(
         .text("model", model.to_string())
         .text("prompt", prompt.to_string())
         .text("size", size.to_string())
-        .text("response_format", "b64_json")
         .part(
             "image",
             reqwest::multipart::Part::bytes(image_bytes)
@@ -476,7 +474,6 @@ pub async fn generate_openai_stream(
         "model": model,
         "prompt": full_prompt,
         "size": size,
-        "response_format": "b64_json",
         "n": 1,
         "stream": true,
         "partial_images": 2
