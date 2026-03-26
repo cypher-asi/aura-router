@@ -374,6 +374,63 @@ Returns available image generation models and estimated generation times.
 
 ---
 
+## 3D Generation (Tripo)
+
+### POST /v1/generate-3d
+
+Submit an image-to-3D generation task. Returns a task ID for polling.
+
+**Authentication:** JWT (required)
+
+**Request body:**
+
+```json
+{
+  "imageUrl": "string (required — publicly accessible URL or base64 data URL)",
+  "prompt": "string (optional)"
+}
+```
+
+If `imageUrl` is a base64 data URL, it is automatically uploaded to S3 first (Tripo requires a URL).
+
+**Response:** `200 OK`
+
+```json
+{
+  "success": true,
+  "taskId": "string",
+  "etaMs": 45000
+}
+```
+
+**Billing:** 50 credits ($0.50) per generation, charged on task submission.
+
+---
+
+### GET /v1/generate-3d/:taskId
+
+Check the status of a 3D generation task.
+
+**Authentication:** JWT (required)
+
+**Path params:** `taskId` (string)
+
+**Response:** `200 OK`
+
+```json
+{
+  "status": "processing | success | failed | queued",
+  "taskId": "string",
+  "glbUrl": "string | null (GLB model URL when complete)",
+  "polyCount": "integer | null",
+  "error": "string | null (error message if failed)"
+}
+```
+
+No additional charge on status check.
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -392,6 +449,7 @@ Returns available image generation models and estimated generation times.
 | `AURA_STORAGE_URL` | No | — | aura-storage base URL for event recording |
 | `AURA_STORAGE_TOKEN` | No | — | Internal service token for aura-storage |
 | `GOOGLE_API_KEY` | No | — | Google API key (required for Gemini image generation) |
+| `TRIPO_API_KEY` | No | — | Tripo API key (required for 3D generation) |
 | `S3_BUCKET_NAME` | No | — | S3 bucket for image uploads (required for image generation) |
 | `AWS_REGION` | No | `us-east-1` | AWS region for S3 |
 | `AWS_ACCESS_KEY_ID` | No | — | AWS credentials for S3 (required for image generation) |

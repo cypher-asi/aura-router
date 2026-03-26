@@ -15,6 +15,7 @@ pub struct AppState {
     pub anthropic_api_key: String,
     pub openai_api_key: Option<String>,
     pub google_api_key: Option<String>,
+    pub tripo_api_key: Option<String>,
 
     // Service URLs
     pub z_billing_url: String,

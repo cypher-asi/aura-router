@@ -1,3 +1,4 @@
+pub mod generate_3d;
 pub mod image_gen;
 pub mod proxy;
 

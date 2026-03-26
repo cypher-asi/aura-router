@@ -6,3 +6,4 @@ pub mod s3;
 pub mod stats;
 pub mod storage;
 pub mod stream;
+pub mod tripo;

@@ -95,6 +95,9 @@ async fn main() -> anyhow::Result<()> {
         google_api_key: std::env::var("GOOGLE_API_KEY")
             .ok()
             .filter(|s| !s.is_empty()),
+        tripo_api_key: std::env::var("TRIPO_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty()),
         z_billing_url,
         z_billing_api_key,
         aura_network_url: std::env::var("AURA_NETWORK_URL")
