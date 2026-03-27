@@ -279,7 +279,10 @@ Generate an image using OpenAI or Gemini. Returns S3 URLs for watermarked and or
   "model": "gpt-image-1 | dall-e-3 | dall-e-2 | gemini-nano-banana (default: gpt-image-1)",
   "images": ["url or base64 data URL"] (optional, reference images),
   "promptMode": "new | remix | edit (optional — overrides model selection: new/remix → gpt-image-1, edit → gemini)",
-  "isIteration": "boolean (default: false — when true, style lock prompt is not appended)"
+  "isIteration": "boolean (default: false — when true, style lock prompt is not appended)",
+  "projectId": "uuid (optional — if provided, artifact is auto-stored in aura-storage)",
+  "parentId": "uuid (optional — parent artifact for iteration tracking)",
+  "name": "string (optional — artifact name)"
 }
 ```
 
@@ -389,7 +392,10 @@ Submit an image-to-3D generation task. Returns a task ID for polling.
 ```json
 {
   "imageUrl": "string (required — publicly accessible URL or base64 data URL)",
-  "prompt": "string (optional)"
+  "prompt": "string (optional)",
+  "projectId": "uuid (optional — if provided, artifact is auto-stored in aura-storage on completion)",
+  "parentId": "uuid (optional — parent artifact for iteration tracking)",
+  "name": "string (optional — artifact name)"
 }
 ```
 

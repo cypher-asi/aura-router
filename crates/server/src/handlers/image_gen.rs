@@ -7,7 +7,7 @@ use axum::Json;
 
 use aura_router_auth::AuthUser;
 use aura_router_core::AppError;
-use aura_router_proxy::{billing, image_gen, s3};
+use aura_router_proxy::{billing, image_gen, s3, storage};
 
 use crate::state::AppState;
 
@@ -167,6 +167,48 @@ pub async fn generate_image(
         });
     }
 
+    // Auto-store artifact in aura-storage (fire-and-forget)
+    if let Some(ref project_id) = input.project_id {
+        if let (Some(ref storage_url), Some(ref storage_token)) =
+            (&state.aura_storage_url, &state.aura_storage_token)
+        {
+            let client = state.http_client.clone();
+            let url = storage_url.clone();
+            let token = storage_token.clone();
+            let pid = project_id.clone();
+            let uid = auth.user_id.clone();
+            let asset = image_url.clone();
+            let orig = original_url.clone();
+            let name = input.name.clone();
+            let prompt = input.prompt.clone();
+            let pm = input.prompt_mode.clone();
+            let m = model.to_string();
+            let p = provider.to_string();
+            let is_iter = input.is_iteration;
+            let parent = input.parent_id.clone();
+            tokio::spawn(async move {
+                storage::store_artifact(
+                    &client,
+                    &url,
+                    &token,
+                    &pid,
+                    &uid,
+                    "image",
+                    &asset,
+                    Some(&orig),
+                    name.as_deref(),
+                    Some(&prompt),
+                    pm.as_deref(),
+                    &m,
+                    &p,
+                    is_iter,
+                    parent.as_deref(),
+                )
+                .await;
+            });
+        }
+    }
+
     let response = image_gen::GenerateImageResponse {
         success: true,
         image_url,
@@ -243,6 +285,11 @@ pub async fn generate_image_stream(
     let gen_images = input.images.clone();
     let gen_model = model_owned.clone();
     let gen_provider = provider_owned.clone();
+    let gen_project_id = input.project_id.clone();
+    let gen_parent_id = input.parent_id.clone();
+    let gen_name = input.name.clone();
+    let gen_prompt_mode = input.prompt_mode.clone();
+    let gen_is_iteration = input.is_iteration;
     let event_tx_clone = event_tx.clone();
 
     tokio::spawn(async move {
@@ -404,6 +451,32 @@ pub async fn generate_image_stream(
             cost_cents,
         )
         .await;
+
+        // Auto-store artifact
+        if let Some(ref pid) = gen_project_id {
+            if let (Some(ref surl), Some(ref stok)) =
+                (&gen_state.aura_storage_url, &gen_state.aura_storage_token)
+            {
+                storage::store_artifact(
+                    &gen_state.http_client,
+                    surl,
+                    stok,
+                    pid,
+                    &gen_user_id,
+                    "image",
+                    &image_url,
+                    original_url.as_deref(),
+                    gen_name.as_deref(),
+                    Some(&gen_prompt),
+                    gen_prompt_mode.as_deref(),
+                    &gen_model,
+                    &gen_provider,
+                    gen_is_iteration,
+                    gen_parent_id.as_deref(),
+                )
+                .await;
+            }
+        }
 
         let _ = event_tx_clone
             .send(image_gen::ImageStreamEvent::Completed {

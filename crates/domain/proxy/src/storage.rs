@@ -131,3 +131,59 @@ pub async fn store_events(
         }
     }
 }
+
+/// Store a generated artifact in aura-storage (fire-and-forget).
+///
+/// Calls POST /internal/artifacts.
+/// Errors are logged but do not block the response.
+pub async fn store_artifact(
+    client: &reqwest::Client,
+    storage_url: &str,
+    token: &str,
+    project_id: &str,
+    created_by: &str,
+    artifact_type: &str,
+    asset_url: &str,
+    original_url: Option<&str>,
+    name: Option<&str>,
+    prompt: Option<&str>,
+    prompt_mode: Option<&str>,
+    model: &str,
+    provider: &str,
+    is_iteration: bool,
+    parent_id: Option<&str>,
+) {
+    let url = format!("{storage_url}/internal/artifacts");
+
+    let result = client
+        .post(&url)
+        .header("x-internal-token", token)
+        .json(&serde_json::json!({
+            "projectId": project_id,
+            "createdBy": created_by,
+            "type": artifact_type,
+            "assetUrl": asset_url,
+            "originalUrl": original_url,
+            "name": name,
+            "prompt": prompt,
+            "promptMode": prompt_mode,
+            "model": model,
+            "provider": provider,
+            "isIteration": is_iteration,
+            "parentId": parent_id,
+        }))
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!("Artifact stored to aura-storage");
+        }
+        Ok(resp) => {
+            tracing::warn!(status = %resp.status(), "Failed to store artifact");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to reach aura-storage for artifact");
+        }
+    }
+}

@@ -19,6 +19,12 @@ pub struct Generate3dRequest {
     pub image_url: String,
     /// Optional text prompt for guidance.
     pub prompt: Option<String>,
+    /// Project to store the artifact in.
+    pub project_id: Option<String>,
+    /// Parent artifact for iteration tracking.
+    pub parent_id: Option<String>,
+    /// Name for the artifact.
+    pub name: Option<String>,
 }
 
 /// Response from creating a 3D generation task.

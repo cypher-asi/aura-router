@@ -7,7 +7,7 @@ use axum::Json;
 
 use aura_router_auth::AuthUser;
 use aura_router_core::AppError;
-use aura_router_proxy::{billing, tripo};
+use aura_router_proxy::{billing, storage, tripo};
 
 use crate::state::AppState;
 
@@ -100,6 +100,56 @@ pub async fn generate_3d(
                 tracing::warn!(error = %e, "Failed to debit credits for 3D generation");
             }
         });
+    }
+
+    // Background: poll for completion and auto-store artifact
+    if let Some(ref project_id) = input.project_id {
+        if let (Some(ref storage_url), Some(ref storage_token)) =
+            (&state.aura_storage_url, &state.aura_storage_token)
+        {
+            let client = state.http_client.clone();
+            let api_key = tripo_api_key.clone();
+            let tid = task_id.clone();
+            let surl = storage_url.clone();
+            let stok = storage_token.clone();
+            let pid = project_id.clone();
+            let uid = auth.user_id.clone();
+            let name = input.name.clone();
+            let prompt = input.prompt.clone();
+            let parent = input.parent_id.clone();
+            tokio::spawn(async move {
+                match tripo::poll_task(&client, &api_key, &tid).await {
+                    Ok(status) if status.status == "success" => {
+                        if let Some(ref glb_url) = status.glb_url {
+                            storage::store_artifact(
+                                &client,
+                                &surl,
+                                &stok,
+                                &pid,
+                                &uid,
+                                "model",
+                                glb_url,
+                                None,
+                                name.as_deref(),
+                                prompt.as_deref(),
+                                None,
+                                "tripo-v2",
+                                "tripo",
+                                false,
+                                parent.as_deref(),
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(status) => {
+                        tracing::warn!(task_id = %tid, status = %status.status, "3D generation did not succeed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %tid, error = %e, "3D generation polling failed");
+                    }
+                }
+            });
+        }
     }
 
     let response = tripo::Generate3dResponse {

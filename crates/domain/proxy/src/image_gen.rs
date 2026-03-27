@@ -18,6 +18,9 @@ pub struct GenerateImageRequest {
     pub prompt_mode: Option<String>,
     #[serde(default)]
     pub is_iteration: bool,
+    pub project_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub name: Option<String>,
 }
 
 fn default_size() -> String {
