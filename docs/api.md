@@ -415,6 +415,37 @@ If `imageUrl` is a base64 data URL, it is automatically uploaded to S3 first (Tr
 
 ---
 
+### POST /v1/generate-3d/stream
+
+Submit and stream 3D generation progress via SSE. The server handles the full lifecycle — submit, poll, store artifact, and push events to the client.
+
+**Authentication:** JWT (required)
+
+**Request body:** Same as `POST /v1/generate-3d`
+
+**Response:** SSE stream (`text/event-stream`)
+
+Events:
+
+```
+data: {"type":"start","ts":"2026-03-27T10:00:00Z"}
+
+data: {"type":"submitted","taskId":"uuid"}
+
+data: {"type":"progress","percent":10,"message":"Generating 3D model..."}
+
+data: {"type":"completed","taskId":"uuid","glbUrl":"https://...","polyCount":12345}
+```
+
+Error event:
+```
+data: {"type":"error","code":"GENERATION_FAILED","message":"..."}
+```
+
+If `projectId` is provided, the artifact is automatically stored on completion.
+
+---
+
 ### GET /v1/generate-3d/:taskId
 
 Check the status of a 3D generation task.

@@ -19,6 +19,10 @@ pub fn create_router() -> Router<AppState> {
         )
         .route("/v1/generate-3d", post(handlers::generate_3d::generate_3d))
         .route(
+            "/v1/generate-3d/stream",
+            post(handlers::generate_3d::generate_3d_stream),
+        )
+        .route(
             "/v1/generate-3d/:taskId",
             get(handlers::generate_3d::get_3d_status),
         )
