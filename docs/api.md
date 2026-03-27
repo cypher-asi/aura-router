@@ -264,9 +264,15 @@ aura-router communicates with three backend services. The pre-check call is sync
 
 ## Image Generation
 
+Two paths available:
+- **Non-streaming** (`POST /v1/generate-image`) — Synchronous. Client sends request, waits, gets final S3 URLs back in one response. No polling needed. Best for API/programmatic use.
+- **Streaming** (`POST /v1/generate-image/stream`) — SSE. Client connects once and receives real-time events (progress, partial image previews, completion). No polling needed. Best for UI with live feedback.
+
+Both paths auto-store artifacts in aura-storage when `projectId` is provided.
+
 ### POST /v1/generate-image
 
-Generate an image using OpenAI or Gemini. Returns S3 URLs for watermarked and original images.
+Synchronous image generation. Client waits for the full response — no polling or WebSocket needed.
 
 **Authentication:** JWT (required)
 
@@ -381,9 +387,15 @@ Returns available image generation models and estimated generation times.
 
 ## 3D Generation (Tripo)
 
+3D generation takes 45-120 seconds, so it's always asynchronous. Two paths available:
+- **Non-streaming** (`POST /v1/generate-3d`) — Returns a `taskId` immediately. Client polls `GET /v1/generate-3d/:taskId` for status until complete. Best for API/programmatic use where SSE isn't practical.
+- **Streaming** (`POST /v1/generate-3d/stream`) — SSE. Server handles the full lifecycle (submit → poll → complete). Client connects once and receives events — no polling needed. Best for UI with live feedback.
+
+Both paths auto-store artifacts in aura-storage when `projectId` is provided.
+
 ### POST /v1/generate-3d
 
-Submit an image-to-3D generation task. Returns a task ID for polling.
+Submit an image-to-3D generation task. Returns a task ID immediately. Client polls `GET /v1/generate-3d/:taskId` for status.
 
 **Authentication:** JWT (required)
 
