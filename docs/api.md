@@ -303,7 +303,7 @@ Generate an image using OpenAI or Gemini. Returns S3 URLs for watermarked and or
 }
 ```
 
-A style lock prompt is automatically appended to all generation requests for consistent product render output.
+A style lock prompt is automatically appended to generation requests for consistent product render output, unless `isIteration` is `true`.
 
 **Billing:** Flat per-generation cost (26 credits/$0.26 for GPT-Image-1, 20/$0.20 for DALL-E 3, 7/$0.07 for DALL-E 2, 13/$0.13 for Gemini).
 
