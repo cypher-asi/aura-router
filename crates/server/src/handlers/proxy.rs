@@ -234,6 +234,10 @@ fn resolve_provider_api_key(
             .xai_api_key
             .clone()
             .ok_or_else(|| AppError::BadRequest("xAI provider not configured".into())),
+        providers::Provider::Moonshot => state
+            .moonshot_api_key
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Moonshot provider not configured".into())),
         providers::Provider::Fireworks => state
             .fireworks_api_key
             .clone()
@@ -556,6 +560,7 @@ fn provider_from_name(provider_name: &str) -> providers::Provider {
     match provider_name {
         "openai" => providers::Provider::OpenAi,
         "xai" => providers::Provider::Xai,
+        "moonshot" => providers::Provider::Moonshot,
         "fireworks" => providers::Provider::Fireworks,
         "deepseek" => providers::Provider::DeepSeek,
         "google" => providers::Provider::Google,
@@ -575,8 +580,8 @@ fn apply_provider_request_controls(
     // `X-Aura-Prompt-Cache-Key` header. The router forwards that value
     // verbatim and never synthesizes its own (a router-built
     // org/project/agent/model key overran the 64-char limit and tripped
-    // OpenAI's `invalid_request_error`). For xAI, Chat Completions uses
-    // `x-grok-conv-id`, while Responses uses `prompt_cache_key`.
+    // OpenAI's `invalid_request_error`). Moonshot and xAI Responses use
+    // `prompt_cache_key`; xAI Chat Completions uses `x-grok-conv-id`.
     // When no key is threaded, the request simply goes out without one.
     let Some(cache_key) = session_ctx.and_then(|ctx| ctx.prompt_cache_key.as_deref()) else {
         return;
@@ -584,6 +589,7 @@ fn apply_provider_request_controls(
 
     match (provider, openai_api) {
         (providers::Provider::OpenAi, _)
+        | (providers::Provider::Moonshot, _)
         | (providers::Provider::Xai, providers::OpenAiApi::Responses) => {
             let Some(body) = upstream_body.as_object_mut() else {
                 return;
@@ -1091,6 +1097,7 @@ mod tests {
             anthropic_api_key,
             openai_api_key,
             xai_api_key: None,
+            moonshot_api_key: None,
             fireworks_api_key,
             deepseek_api_key: None,
             google_api_key: None,
@@ -1146,6 +1153,34 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_requires_and_uses_platform_key() {
+        let mut state = test_state(
+            "test-cookie-secret",
+            "http://billing.test".to_string(),
+            "anthropic-unused".to_string(),
+            None,
+            None,
+        );
+        let error = super::resolve_provider_api_key(
+            &state,
+            aura_router_proxy::providers::Provider::Moonshot,
+        )
+        .expect_err("Kimi K3 should require Aura's platform Moonshot key");
+        assert_eq!(
+            error.to_string(),
+            "Bad request: Moonshot provider not configured"
+        );
+
+        state.moonshot_api_key = Some("platform-moonshot-key".to_string());
+        let key = super::resolve_provider_api_key(
+            &state,
+            aura_router_proxy::providers::Provider::Moonshot,
+        )
+        .expect("platform Moonshot key should configure provider");
+        assert_eq!(key, "platform-moonshot-key");
+    }
+
+    #[test]
     fn openai_provider_request_controls_forward_threaded_cache_key() {
         let session = aura_router_proxy::storage::SessionContext {
             session_id: Some("session-ignored".to_string()),
@@ -1171,6 +1206,28 @@ mod tests {
         // The router forwards the harness-supplied key verbatim and never
         // synthesizes its own org/project/agent/model key.
         assert_eq!(upstream["prompt_cache_key"], "instance:abc-123");
+        assert!(upstream.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn moonshot_provider_controls_forward_threaded_cache_key() {
+        let session = aura_router_proxy::storage::SessionContext {
+            prompt_cache_key: Some("instance:kimi-123".to_string()),
+            ..Default::default()
+        };
+        let mut upstream = json!({ "model": "kimi-k3", "messages": [] });
+        let mut upstream_headers = reqwest::header::HeaderMap::new();
+
+        super::apply_provider_request_controls(
+            aura_router_proxy::providers::Provider::Moonshot,
+            aura_router_proxy::providers::OpenAiApi::ChatCompletions,
+            &mut upstream_headers,
+            &mut upstream,
+            Some(&session),
+        );
+
+        assert_eq!(upstream["prompt_cache_key"], "instance:kimi-123");
+        assert!(upstream.get("prompt_cache_options").is_none());
         assert!(upstream.get("prompt_cache_retention").is_none());
     }
 
@@ -1640,6 +1697,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uses_moonshot_provider_for_kimi_k3_credit_check() {
+        let cookie_secret = "test-cookie-secret";
+        let jwt = test_jwt(cookie_secret, "user-moonshot-credit-check");
+        let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
+            "sufficient": false,
+            "balance_cents": 1,
+            "required_cents": 3,
+        }))
+        .await;
+
+        let app = router::create_router().with_state(test_state(
+            cookie_secret,
+            billing_url,
+            "unused".to_string(),
+            None,
+            None,
+        ));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(header::AUTHORIZATION, format!("Bearer {jwt}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "aura-kimi-k3",
+                    "max_tokens": 32,
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hello"}]
+                    }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["provider"], "moonshot");
+        assert_eq!(requests[0]["model"], "aura-kimi-k3");
+    }
+
+    #[tokio::test]
     async fn reports_deepseek_cache_aware_usage_cost_to_billing() {
         let cookie_secret = "test-cookie-secret";
         let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
@@ -1689,6 +1791,53 @@ mod tests {
             requests[0]["metadata"]["cost_observability"]["estimated_provider_cost_microusd"],
             142_800
         );
+    }
+
+    #[tokio::test]
+    async fn reports_moonshot_cache_aware_usage_cost_to_billing() {
+        let cookie_secret = "test-cookie-secret";
+        let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
+            "sufficient": true,
+            "balance_cents": 1_000_000,
+            "required_cents": 1,
+        }))
+        .await;
+        let state = test_state(cookie_secret, billing_url, "unused".to_string(), None, None);
+
+        super::spawn_post_request_tasks(
+            &state,
+            "user-moonshot-billing",
+            None,
+            None,
+            None,
+            "moonshot",
+            "aura-kimi-k3",
+            billing::UsageCostInput {
+                input_tokens: 1_000_000,
+                output_tokens: 500_000,
+                cache_read_input_tokens: 400_000,
+                ..billing::UsageCostInput::default()
+            },
+            None,
+            None,
+            123,
+            "test-event-moonshot".to_string(),
+        );
+
+        for _ in 0..20 {
+            if !recorded_requests.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["cost_cents"], 1130);
+        assert_eq!(requests[0]["metric"]["provider"], "moonshot");
+        assert_eq!(requests[0]["metric"]["model"], "aura-kimi-k3");
+        assert_eq!(requests[0]["metric"]["input_tokens"], 1_000_000);
+        assert_eq!(requests[0]["metric"]["output_tokens"], 500_000);
     }
 
     #[tokio::test]
@@ -2238,6 +2387,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn moonshot_live_smoke_for_kimi_k3() {
+        dotenvy::dotenv().ok();
+        let Some(moonshot_api_key) = std::env::var("MOONSHOT_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping Kimi K3 live smoke test because MOONSHOT_API_KEY is missing");
+            return;
+        };
+
+        let cookie_secret = "test-cookie-secret";
+        let jwt = test_jwt(cookie_secret, "user-moonshot-smoke");
+        let (billing_url, _billing_handle) = start_mock_billing().await;
+
+        let mut state = test_state(cookie_secret, billing_url, "unused".to_string(), None, None);
+        state.moonshot_api_key = Some(moonshot_api_key);
+        let app = router::create_router().with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(header::AUTHORIZATION, format!("Bearer {jwt}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "aura-kimi-k3",
+                    "max_tokens": 128,
+                    "reasoning_effort": "low",
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "Reply with exactly KIMI_K3_OK and nothing else."
+                        }]
+                    }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("response bytes");
+        let response: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("normalized Kimi K3 response");
+        assert_eq!(response["model"], "aura-kimi-k3");
+        assert!(
+            response["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| {
+                    block.get("type").and_then(|value| value.as_str()) == Some("text")
+                        && block
+                            .get("text")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|text| text.contains("KIMI_K3_OK"))
+                })),
+            "expected live Kimi K3 response text: {response}"
+        );
+        assert!(
+            response["usage"]["input_tokens"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "expected Kimi K3 input usage: {response}"
+        );
+        assert!(
+            response["usage"]["output_tokens"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "expected Kimi K3 output usage: {response}"
+        );
+    }
+
+    #[tokio::test]
     async fn fireworks_live_smoke_for_aura_managed_model() {
         dotenvy::dotenv().ok();
         let Some(fireworks_api_key) = std::env::var("FIREWORKS_API_KEY")
@@ -2266,7 +2492,7 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 json!({
-                    "model": "aura-kimi-k2-5",
+                    "model": "aura-kimi-k2-6",
                     "max_tokens": 32,
                     "temperature": 0,
                     "messages": [
@@ -2293,7 +2519,7 @@ mod tests {
             .expect("response bytes");
         let response: serde_json::Value =
             serde_json::from_slice(&bytes).expect("normalized anthropic response");
-        assert_eq!(response["model"], "aura-kimi-k2-5");
+        assert_eq!(response["model"], "aura-kimi-k2-6");
         let text = response["content"]
             .as_array()
             .and_then(|blocks| {

@@ -347,8 +347,27 @@ fn cache_aware_rates_on(
         "deepseek" => deepseek_rates(model),
         "openai" => openai_rates(model),
         "xai" => xai_rates(model),
+        "moonshot" => moonshot_rates(model),
         "fireworks" => fireworks_rates(model),
         "google" => google_rates(model),
+        _ => None,
+    }
+}
+
+/// Per-model rates for Moonshot's first-party OpenAI-compatible API.
+///
+/// Kimi K3 reports cached tokens within total prompt tokens and publishes
+/// cache hits at $0.30/M versus $3.00/M for uncached input.
+fn moonshot_rates(model: &str) -> Option<CacheAwareRates> {
+    let model = model.strip_prefix("moonshot/").unwrap_or(model);
+    match model {
+        "aura-kimi-k3" | "kimi-k3" => Some(CacheAwareRates {
+            new_input_cents_per_million: 300.0,
+            cache_write_input_cents_per_million: 300.0,
+            cache_read_input_cents_per_million: 30.0,
+            output_cents_per_million: 1500.0,
+            input_tokens_is_new_only: false,
+        }),
         _ => None,
     }
 }
@@ -997,6 +1016,20 @@ mod tests {
                 1_000_000
             ),
             Some(288)
+        );
+    }
+
+    #[test]
+    fn moonshot_kimi_k3_cache_aware_cost_discounts_cached_tokens() {
+        // 600k new × 300 + 400k cached × 30 + 500k output × 1500,
+        // then Aura's 20% markup = 1,130 cents after rounding.
+        assert_eq!(
+            cache_aware_cost_cents("moonshot", "aura-kimi-k3", 1_000_000, 500_000, 0, 400_000,),
+            Some(1130)
+        );
+        assert_eq!(
+            cache_aware_cost_cents("moonshot", "kimi-k3", 1_000_000, 500_000, 0, 0),
+            None
         );
     }
 

@@ -92,11 +92,15 @@ The `model` field determines which upstream provider handles the request.
 | `claude-*` | Anthropic | `https://api.anthropic.com/v1/messages` |
 | `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `codex-*` | OpenAI | `https://api.openai.com/v1/chat/completions` |
 | `grok-*`, `aura-grok-*`, `xai/grok-*` | xAI | `https://api.x.ai/v1/chat/completions` or `https://api.x.ai/v1/responses` when tools are present |
+| `kimi-k3`, `aura-kimi-k3`, `moonshot/kimi-k3` | Moonshot | `https://api.moonshot.ai/v1/chat/completions` |
 
 Unsupported model prefixes return `400 Bad Request`.
 
 OpenAI routing requires the `OPENAI_API_KEY` environment variable to be configured; if it is absent, requests for OpenAI models return `400 Bad Request`.
 xAI routing requires Aura's platform `XAI_API_KEY` environment variable to be configured; if it is absent, requests for Grok models return `400 Bad Request`. Caller-supplied provider-key headers are ignored for xAI model routing; X account access should be exposed through configured MCP tools instead.
+Kimi K3 routing requires Aura's platform `MOONSHOT_API_KEY`; if it is absent,
+K3 requests return `400 Bad Request`. The router forwards
+`X-Aura-Prompt-Cache-Key` as Moonshot's `prompt_cache_key`.
 
 When a caller supplies `X-Aura-Prompt-Cache-Key`, the router forwards it to
 xAI Chat Completions as `x-grok-conv-id`; tool-bearing xAI Responses requests
@@ -526,6 +530,7 @@ No additional charge on status check.
 | `ANTHROPIC_API_KEY` | Yes | — | Platform Anthropic API key (used for all `claude-*` requests) |
 | `OPENAI_API_KEY` | No | — | Platform OpenAI API key (required for `gpt-*`/`o1-*`/`o3-*`/`o4-*`/`codex-*` models) |
 | `XAI_API_KEY` | No | — | Platform xAI API key (required for `grok-*`, `aura-grok-*`, and xAI Remote MCP tool requests) |
+| `MOONSHOT_API_KEY` | No | — | Platform Moonshot API key (required for `kimi-k3` and `aura-kimi-k3`) |
 | `Z_BILLING_URL` | Yes | — | z-billing service base URL |
 | `Z_BILLING_API_KEY` | Yes | — | API key for z-billing requests |
 | `AURA_NETWORK_URL` | No | — | aura-network base URL for usage recording |

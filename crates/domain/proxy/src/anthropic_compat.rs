@@ -13,6 +13,7 @@ pub fn validate_request(provider: Provider, request: &Value) -> Result<(), Strin
         Provider::OpenAi | Provider::Xai | Provider::DeepSeek | Provider::Google => {
             validate_openai_request(request)
         }
+        Provider::Moonshot => validate_moonshot_request(request),
         Provider::Fireworks => {
             validate_openai_request(request)?;
             validate_fireworks_privacy_policy(request)
@@ -51,6 +52,20 @@ pub fn request_to_upstream(
             apply_openai_prompt_cache_controls(provider, upstream_model, request, &mut upstream);
             Ok(upstream)
         }
+        Provider::Moonshot => {
+            validate_moonshot_request(request)?;
+            let mut upstream = anthropic_request_to_openai(request, upstream_model)?;
+            // K3 fixes these sampling values and rejects client overrides.
+            // They must be omitted even when the Anthropic-compatible caller
+            // supplied temperature/top_p.
+            if let Some(object) = upstream.as_object_mut() {
+                object.remove("temperature");
+                object.remove("top_p");
+            }
+            apply_reasoning_effort(provider, upstream_model, request, &mut upstream);
+            apply_openai_prompt_cache_controls(provider, upstream_model, request, &mut upstream);
+            Ok(upstream)
+        }
         Provider::Google => {
             validate_openai_request(request)?;
             google_compat::request_to_gemini(upstream_model, request)
@@ -71,6 +86,8 @@ pub fn request_to_upstream(
 ///   `minimal` maps to `none`, while larger unsupported tiers fold to `high`.
 /// - Fireworks open-weight models (e.g. GPT-OSS) accept
 ///   `low`/`medium`/`high` (`minimal` folds to `low`).
+/// - Moonshot Kimi K3 accepts `low`/`high`/`max`; neutral intermediate
+///   tiers fold to the nearest supported native tier.
 /// - DeepSeek has no discrete effort knob, so the hint is dropped.
 fn apply_reasoning_effort(
     provider: Provider,
@@ -87,6 +104,12 @@ fn apply_reasoning_effort(
             xai_reasoning_effort(tier)
         }
         Provider::Xai => None,
+        Provider::Moonshot => match tier.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "low" => Some("low"),
+            "medium" | "high" | "xhigh" => Some("high"),
+            "max" => Some("max"),
+            _ => None,
+        },
         Provider::Fireworks => match tier.trim().to_ascii_lowercase().as_str() {
             "minimal" | "low" => Some("low"),
             "medium" => Some("medium"),
@@ -163,7 +186,7 @@ fn apply_openai_prompt_cache_controls(
     request: &Value,
     upstream: &mut Value,
 ) {
-    if provider != Provider::OpenAi {
+    if !matches!(provider, Provider::OpenAi | Provider::Moonshot) {
         return;
     }
     let Some(object) = upstream.as_object_mut() else {
@@ -179,6 +202,12 @@ fn apply_openai_prompt_cache_controls(
             "prompt_cache_key".to_string(),
             Value::String(key.to_string()),
         );
+    }
+
+    // Kimi K3 uses automatic prompt caching and accepts the stable cache
+    // key, but not OpenAI's retention/TTL controls.
+    if provider == Provider::Moonshot {
+        return;
     }
 
     if cache_key.is_some() && upstream_model.starts_with("gpt-5.6") {
@@ -632,8 +661,9 @@ pub fn response_from_upstream(
             next["model"] = Value::String(requested_model.to_string());
             Ok(next)
         }
+        Provider::Moonshot => openai_response_to_anthropic(response, requested_model, true),
         Provider::OpenAi | Provider::Xai | Provider::Fireworks | Provider::DeepSeek => {
-            openai_response_to_anthropic(response, requested_model)
+            openai_response_to_anthropic(response, requested_model, false)
         }
         Provider::Google => google_compat::response_from_gemini(requested_model, response),
     }
@@ -772,6 +802,17 @@ fn anthropic_request_to_openai(request: &Value, upstream_model: &str) -> Result<
 }
 
 fn validate_openai_request(request: &Value) -> Result<(), String> {
+    validate_openai_compatible_request(request, false)
+}
+
+fn validate_moonshot_request(request: &Value) -> Result<(), String> {
+    validate_openai_compatible_request(request, true)
+}
+
+fn validate_openai_compatible_request(
+    request: &Value,
+    allow_assistant_thinking_blocks: bool,
+) -> Result<(), String> {
     if request.get("thinking").is_some() {
         return Err(
             "OpenAI-backed Aura models do not support Anthropic thinking on /v1/messages yet"
@@ -780,7 +821,7 @@ fn validate_openai_request(request: &Value) -> Result<(), String> {
     }
 
     validate_system_blocks(request.get("system"))?;
-    validate_message_blocks(request.get("messages"))?;
+    validate_message_blocks(request.get("messages"), allow_assistant_thinking_blocks)?;
 
     Ok(())
 }
@@ -828,7 +869,10 @@ fn validate_system_blocks(system: Option<&Value>) -> Result<(), String> {
     }
 }
 
-fn validate_message_blocks(messages: Option<&Value>) -> Result<(), String> {
+fn validate_message_blocks(
+    messages: Option<&Value>,
+    allow_assistant_thinking_blocks: bool,
+) -> Result<(), String> {
     let messages = messages
         .and_then(Value::as_array)
         .ok_or_else(|| "Anthropic request is missing messages array".to_string())?;
@@ -865,7 +909,10 @@ fn validate_message_blocks(messages: Option<&Value>) -> Result<(), String> {
                 .unwrap_or_default();
             let supported = match role {
                 "user" => matches!(block_type, "text" | "image" | "tool_result"),
-                "assistant" => matches!(block_type, "text" | "tool_use"),
+                "assistant" => {
+                    matches!(block_type, "text" | "tool_use")
+                        || (allow_assistant_thinking_blocks && block_type == "thinking")
+                }
                 _ => false,
             };
 
@@ -996,11 +1043,17 @@ fn push_pending_user_message(
 }
 
 fn build_assistant_message(blocks: &[Value]) -> Value {
+    let mut reasoning_parts = Vec::new();
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                if let Some(thinking) = block.get("thinking").and_then(Value::as_str) {
+                    reasoning_parts.push(thinking.to_string());
+                }
+            }
             Some("text") => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     text_parts.push(text.to_string());
@@ -1033,11 +1086,18 @@ fn build_assistant_message(blocks: &[Value]) -> Value {
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls);
     }
+    if !reasoning_parts.is_empty() {
+        message["reasoning_content"] = Value::String(reasoning_parts.join(""));
+    }
 
     message
 }
 
-fn openai_response_to_anthropic(response: &Value, requested_model: &str) -> Result<Value, String> {
+fn openai_response_to_anthropic(
+    response: &Value,
+    requested_model: &str,
+    preserve_reasoning_content: bool,
+) -> Result<Value, String> {
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
@@ -1049,6 +1109,22 @@ fn openai_response_to_anthropic(response: &Value, requested_model: &str) -> Resu
         .ok_or_else(|| "OpenAI response is missing message".to_string())?;
 
     let mut content = Vec::new();
+    if preserve_reasoning_content {
+        if let Some(reasoning) = message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .filter(|reasoning| !reasoning.is_empty())
+        {
+            content.push(json!({
+                "type": "thinking",
+                "thinking": reasoning,
+                // Moonshot has no Anthropic-style cryptographic thinking
+                // signature. A stable marker lets Aura retain and replay this
+                // block through its provider-neutral schema.
+                "signature": "moonshot"
+            }));
+        }
+    }
     if let Some(text) = extract_openai_text(message.get("content")) {
         if !text.trim().is_empty() {
             content.push(json!({
@@ -1095,6 +1171,7 @@ fn openai_response_to_anthropic(response: &Value, requested_model: &str) -> Resu
     let cache_read_input_tokens = usage
         .get("prompt_cache_hit_tokens")
         .and_then(Value::as_u64)
+        .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
         .or_else(|| {
             usage
                 .pointer("/prompt_tokens_details/cached_tokens")
@@ -1393,6 +1470,89 @@ mod tests {
             upstream["reasoning_effort"],
             Value::String("low".to_string())
         );
+    }
+
+    #[test]
+    fn maps_kimi_k3_reasoning_effort_and_prompt_cache_key() {
+        for (tier, expected) in [
+            ("low", "low"),
+            ("medium", "high"),
+            ("high", "high"),
+            ("xhigh", "high"),
+            ("max", "max"),
+        ] {
+            let request = json!({
+                "model": "aura-kimi-k3",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "max_tokens": 1024,
+                "reasoning_effort": tier,
+                "prompt_cache_key": "workspace-123",
+                "temperature": 0,
+                "top_p": 1
+            });
+            let upstream =
+                request_to_upstream(Provider::Moonshot, "kimi-k3", &request).expect("translation");
+            assert_eq!(upstream["reasoning_effort"], expected);
+            assert_eq!(upstream["prompt_cache_key"], "workspace-123");
+            assert!(upstream.get("temperature").is_none());
+            assert!(upstream.get("top_p").is_none());
+            assert!(upstream.get("prompt_cache_options").is_none());
+            assert!(upstream.get("prompt_cache_retention").is_none());
+        }
+    }
+
+    #[test]
+    fn preserves_kimi_k3_reasoning_content_for_tool_turn_replay() {
+        let request = json!({
+            "model": "aura-kimi-k3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Check the weather."}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "I should call the weather tool.",
+                            "signature": "moonshot"
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_weather",
+                            "name": "get_weather",
+                            "input": {"city": "Karachi"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call_weather",
+                        "content": "Sunny"
+                    }]
+                }
+            ],
+            "max_tokens": 1024
+        });
+
+        let upstream =
+            request_to_upstream(Provider::Moonshot, "kimi-k3", &request).expect("translation");
+        let assistant = upstream["messages"]
+            .as_array()
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .find(|message| message["role"] == "assistant")
+            })
+            .expect("assistant message");
+        assert_eq!(
+            assistant["reasoning_content"],
+            "I should call the weather tool."
+        );
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_weather");
     }
 
     #[test]
@@ -1797,6 +1957,40 @@ mod tests {
     }
 
     #[test]
+    fn translates_moonshot_top_level_cached_tokens() {
+        let response = json!({
+            "id": "chatcmpl_kimi",
+            "model": "kimi-k3",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "I can answer directly.",
+                    "content": "Done"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "cached_tokens": 40
+            }
+        });
+
+        let translated = response_from_upstream(Provider::Moonshot, "aura-kimi-k3", &response)
+            .expect("translation");
+        assert_eq!(translated["model"], "aura-kimi-k3");
+        assert_eq!(translated["usage"]["input_tokens"], 100);
+        assert_eq!(translated["usage"]["output_tokens"], 20);
+        assert_eq!(translated["usage"]["cache_read_input_tokens"], 40);
+        assert_eq!(translated["content"][0]["type"], "thinking");
+        assert_eq!(
+            translated["content"][0]["thinking"],
+            "I can answer directly."
+        );
+        assert_eq!(translated["content"][1]["type"], "text");
+    }
+
+    #[test]
     fn translates_deepseek_cache_usage_aliases() {
         let response = json!({
             "id": "deepseek_123",
@@ -1860,7 +2054,7 @@ mod tests {
     #[test]
     fn rejects_fireworks_requests_with_store_flag() {
         let request = json!({
-            "model": "aura-kimi-k2-5",
+            "model": "aura-kimi-k2-6",
             "store": true,
             "messages": [{
                 "role": "user",
@@ -1876,7 +2070,7 @@ mod tests {
     #[test]
     fn rejects_fireworks_requests_with_response_state_replay() {
         let request = json!({
-            "model": "aura-kimi-k2-5",
+            "model": "aura-kimi-k2-6",
             "response_id": "resp_123",
             "messages": [{
                 "role": "user",
