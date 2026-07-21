@@ -156,6 +156,9 @@ pub async fn messages(
         &mut upstream_request_value,
         session_ctx.as_ref(),
     );
+    if provider == providers::Provider::Anthropic && !is_public_guest {
+        set_anthropic_user_metadata(&mut upstream_request_value, &auth.user_id)?;
+    }
     let upstream_body = serde_json::to_vec(&upstream_request_value)
         .map_err(|e| AppError::Internal(format!("Failed to encode upstream body: {e}")))?;
 
@@ -257,10 +260,13 @@ async fn handle_non_streaming(
 
     let upstream_value: serde_json::Value = serde_json::from_slice(&response_bytes)
         .map_err(|e| AppError::ProviderError(format!("Provider returned invalid JSON: {e}")))?;
-    let provider_reported_cost_cents = upstream_value
+    let provider_reported_cost_ticks = upstream_value
         .pointer("/usage/cost_in_usd_ticks")
-        .and_then(|value| value.as_u64())
-        .and_then(billing::marked_up_cost_cents_from_usd_ticks);
+        .and_then(|value| value.as_u64());
+    let provider_reported_cost_cents =
+        provider_reported_cost_ticks.and_then(billing::marked_up_cost_cents_from_usd_ticks);
+    let provider_reported_cost_microusd =
+        provider_reported_cost_ticks.and_then(billing::provider_cost_microusd_from_usd_ticks);
     let response_value = match openai_api {
         providers::OpenAiApi::Responses => {
             anthropic_compat::openai_responses_to_anthropic(&upstream_value, model)
@@ -293,6 +299,38 @@ async fn handle_non_streaming(
         .pointer("/usage/cache_read_input_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let cache_creation_5m_input_tokens = response_value
+        .pointer("/usage/cache_creation/ephemeral_5m_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation_1h_input_tokens = response_value
+        .pointer("/usage/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let web_search_requests = response_value
+        .pointer("/usage/server_tool_use/web_search_requests")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let web_fetch_requests = response_value
+        .pointer("/usage/server_tool_use/web_fetch_requests")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let code_execution_requests = response_value
+        .pointer("/usage/server_tool_use/code_execution_requests")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let service_tier = response_value
+        .pointer("/usage/service_tier")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let inference_geo = response_value
+        .pointer("/usage/inference_geo")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let speed = response_value
+        .pointer("/usage/speed")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let org_id_ref = session_ctx.as_ref().and_then(|c| c.org_id.as_deref());
     let project_id_ref = session_ctx.as_ref().and_then(|c| c.project_id.as_deref());
@@ -310,11 +348,22 @@ async fn handle_non_streaming(
         agent_id_ref,
         provider_name,
         model,
-        input_tokens,
-        output_tokens,
-        cache_creation_input_tokens,
-        cache_read_input_tokens,
+        billing::UsageCostInput {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_creation_5m_input_tokens,
+            cache_creation_1h_input_tokens,
+            cache_read_input_tokens,
+            web_search_requests,
+            web_fetch_requests,
+            code_execution_requests,
+            service_tier,
+            inference_geo,
+            speed,
+        },
         provider_reported_cost_cents,
+        provider_reported_cost_microusd,
         duration_ms,
     );
 
@@ -409,11 +458,22 @@ async fn handle_streaming(
                 stream_agent_id.as_deref(),
                 &provider_owned,
                 model,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
+                billing::UsageCostInput {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_creation_5m_input_tokens: usage.cache_creation_5m_input_tokens,
+                    cache_creation_1h_input_tokens: usage.cache_creation_1h_input_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    web_search_requests: usage.web_search_requests,
+                    web_fetch_requests: usage.web_fetch_requests,
+                    code_execution_requests: usage.code_execution_requests,
+                    service_tier: usage.service_tier.clone(),
+                    inference_geo: usage.inference_geo.clone(),
+                    speed: usage.speed.clone(),
+                },
                 usage.provider_reported_cost_cents,
+                usage.provider_reported_cost_microusd,
                 duration_ms,
             );
 
@@ -522,6 +582,20 @@ fn apply_provider_request_controls(
         }
         _ => {}
     }
+}
+
+fn set_anthropic_user_metadata(
+    upstream_body: &mut serde_json::Value,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let body = upstream_body
+        .as_object_mut()
+        .ok_or_else(|| AppError::Internal("Anthropic request body must be an object".into()))?;
+    body.insert(
+        "metadata".to_string(),
+        serde_json::json!({ "user_id": user_id }),
+    );
+    Ok(())
 }
 
 fn normalize_upstream_error(status: StatusCode, error_body: &[u8]) -> Response {
@@ -647,11 +721,9 @@ fn spawn_post_request_tasks(
     agent_id: Option<&str>,
     provider_name: &str,
     model: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_input_tokens: u64,
-    cache_read_input_tokens: u64,
+    usage: billing::UsageCostInput,
     provider_reported_cost_cents: Option<i64>,
+    provider_reported_cost_microusd: Option<i64>,
     duration_ms: u64,
 ) {
     let event_id = uuid::Uuid::new_v4().to_string();
@@ -661,16 +733,53 @@ fn spawn_post_request_tasks(
     let org_id_owned = org_id.map(String::from);
     let project_id_owned = project_id.map(String::from);
     let agent_id_owned = agent_id.map(String::from);
+    let static_estimate = billing::estimate_usage_cost(provider_name, model, &usage);
+    let has_detailed_cost_override = usage.cache_creation_input_tokens > 0
+        || usage.cache_creation_5m_input_tokens > 0
+        || usage.cache_creation_1h_input_tokens > 0
+        || usage.cache_read_input_tokens > 0
+        || usage.web_search_requests > 0
+        || usage.inference_geo.as_deref() == Some("us")
+        || usage.speed.as_deref() == Some("fast");
     let cost_cents = provider_reported_cost_cents.or_else(|| {
-        billing::cache_aware_cost_cents(
-            provider_name,
-            model,
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-        )
+        has_detailed_cost_override
+            .then(|| static_estimate.map(|estimate| estimate.billed_cost_cents))
+            .flatten()
     });
+    let estimated_provider_cost_microusd = provider_reported_cost_microusd
+        .or_else(|| static_estimate.map(|estimate| estimate.provider_cost_microusd));
+    let cost_estimate_source = if provider_reported_cost_microusd.is_some() {
+        "provider_reported"
+    } else {
+        "static_model_rates"
+    };
+    let markup_bps = static_estimate.map_or(2_000, |estimate| estimate.markup_bps);
+    let metadata = serde_json::json!({
+        "org_id": org_id,
+        "project_id": project_id,
+        "agent_id": agent_id,
+        "cost_observability": {
+            "schema_version": 1,
+            "estimated_provider_cost_microusd": estimated_provider_cost_microusd,
+            "estimate_source": cost_estimate_source,
+            "pricing_source": billing::PRICING_SOURCE,
+            "markup_bps": markup_bps,
+            "uncached_input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "cache_creation_5m_input_tokens": usage.cache_creation_5m_input_tokens,
+            "cache_creation_1h_input_tokens": usage.cache_creation_1h_input_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+            "web_search_requests": usage.web_search_requests,
+            "web_fetch_requests": usage.web_fetch_requests,
+            "code_execution_requests": usage.code_execution_requests,
+            "service_tier": usage.service_tier.clone(),
+            "inference_geo": usage.inference_geo.clone(),
+            "speed": usage.speed.clone(),
+        }
+    });
+    let input_tokens = usage.input_tokens;
+    let output_tokens = usage.output_tokens;
 
     // Debit z-billing (skip for public-guest — no billing account)
     if user_id != "public-guest" {
@@ -680,6 +789,7 @@ fn spawn_post_request_tasks(
         let user_id = user_id_owned.clone();
         let model = model_owned.clone();
         let provider = provider_owned.clone();
+        let metadata = metadata.clone();
         tokio::spawn(async move {
             if let Err(e) = billing::report_usage(
                 &client,
@@ -692,6 +802,7 @@ fn spawn_post_request_tasks(
                 input_tokens,
                 output_tokens,
                 cost_cents,
+                Some(metadata),
             )
             .await
             {
@@ -740,6 +851,7 @@ fn spawn_post_request_tasks(
 mod tests {
     use crate::{router, state::AppState};
     use aura_router_auth::{InternalToken, TokenValidator};
+    use aura_router_proxy::billing;
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use axum::routing::post;
@@ -756,6 +868,18 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct TestClaims {
         id: String,
+    }
+
+    #[test]
+    fn anthropic_requests_receive_trusted_opaque_user_metadata() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "metadata": { "user_id": "client-supplied" }
+        });
+
+        super::set_anthropic_user_metadata(&mut body, "aura-user-123").unwrap();
+
+        assert_eq!(body["metadata"]["user_id"], "aura-user-123");
     }
 
     async fn start_mock_billing() -> (String, tokio::task::JoinHandle<()>) {
@@ -1399,10 +1523,13 @@ mod tests {
             None,
             "deepseek",
             "aura-deepseek-v4-flash",
-            1_000_000,
-            500_000,
-            0,
-            1_000_000,
+            billing::UsageCostInput {
+                input_tokens: 1_000_000,
+                output_tokens: 500_000,
+                cache_read_input_tokens: 1_000_000,
+                ..billing::UsageCostInput::default()
+            },
+            None,
             None,
             123,
         );
@@ -1422,6 +1549,10 @@ mod tests {
         assert_eq!(requests[0]["metric"]["model"], "aura-deepseek-v4-flash");
         assert_eq!(requests[0]["metric"]["input_tokens"], 1_000_000);
         assert_eq!(requests[0]["metric"]["output_tokens"], 500_000);
+        assert_eq!(
+            requests[0]["metadata"]["cost_observability"]["estimated_provider_cost_microusd"],
+            168_000
+        );
     }
 
     #[tokio::test]
@@ -1443,10 +1574,13 @@ mod tests {
             None,
             "openai",
             "aura-gpt-5-5",
-            1_000_000,
-            500_000,
-            0,
-            1_000_000,
+            billing::UsageCostInput {
+                input_tokens: 1_000_000,
+                output_tokens: 500_000,
+                cache_read_input_tokens: 1_000_000,
+                ..billing::UsageCostInput::default()
+            },
+            None,
             None,
             123,
         );
@@ -1470,6 +1604,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_anthropic_provider_cost_details_to_billing() {
+        let cookie_secret = "test-cookie-secret";
+        let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
+            "sufficient": true,
+            "balance_cents": 1_000_000,
+            "required_cents": 1,
+        }))
+        .await;
+        let state = test_state(cookie_secret, billing_url, "unused".to_string(), None, None);
+
+        super::spawn_post_request_tasks(
+            &state,
+            "user-anthropic-billing",
+            Some("org-anthropic"),
+            Some("project-anthropic"),
+            None,
+            "anthropic",
+            "claude-sonnet-5",
+            billing::UsageCostInput {
+                input_tokens: 100_000,
+                output_tokens: 10_000,
+                cache_creation_input_tokens: 300_000,
+                cache_creation_5m_input_tokens: 200_000,
+                cache_creation_1h_input_tokens: 100_000,
+                cache_read_input_tokens: 500_000,
+                web_search_requests: 2,
+                web_fetch_requests: 1,
+                code_execution_requests: 4,
+                service_tier: Some("standard".to_string()),
+                inference_geo: Some("us".to_string()),
+                speed: Some("standard".to_string()),
+            },
+            None,
+            None,
+            123,
+        );
+
+        for _ in 0..20 {
+            if !recorded_requests.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let expected = billing::estimate_usage_cost(
+            "anthropic",
+            "claude-sonnet-5",
+            &billing::UsageCostInput {
+                input_tokens: 100_000,
+                output_tokens: 10_000,
+                cache_creation_input_tokens: 300_000,
+                cache_creation_5m_input_tokens: 200_000,
+                cache_creation_1h_input_tokens: 100_000,
+                cache_read_input_tokens: 500_000,
+                web_search_requests: 2,
+                web_fetch_requests: 1,
+                code_execution_requests: 4,
+                service_tier: Some("standard".to_string()),
+                inference_geo: Some("us".to_string()),
+                speed: Some("standard".to_string()),
+            },
+        )
+        .unwrap();
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["cost_cents"], expected.billed_cost_cents);
+        assert_eq!(requests[0]["metadata"]["org_id"], "org-anthropic");
+        assert_eq!(
+            requests[0]["metadata"]["cost_observability"]["estimated_provider_cost_microusd"],
+            expected.provider_cost_microusd
+        );
+        assert_eq!(
+            requests[0]["metadata"]["cost_observability"]["cache_creation_1h_input_tokens"],
+            100_000
+        );
+        assert_eq!(
+            requests[0]["metadata"]["cost_observability"]["web_search_requests"],
+            2
+        );
+        assert_eq!(
+            requests[0]["metadata"]["cost_observability"]["code_execution_requests"],
+            4
+        );
+    }
+
+    #[tokio::test]
     async fn reports_provider_reported_usage_cost_to_billing() {
         let cookie_secret = "test-cookie-secret";
         let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
@@ -1488,11 +1708,13 @@ mod tests {
             None,
             "xai",
             "aura-grok-4-3",
-            10,
-            2,
-            0,
-            0,
+            billing::UsageCostInput {
+                input_tokens: 10,
+                output_tokens: 2,
+                ..billing::UsageCostInput::default()
+            },
             Some(3),
+            Some(25_000),
             123,
         );
 
@@ -1509,6 +1731,10 @@ mod tests {
         assert_eq!(requests[0]["cost_cents"], 3);
         assert_eq!(requests[0]["metric"]["provider"], "xai");
         assert_eq!(requests[0]["metric"]["model"], "aura-grok-4-3");
+        assert_eq!(
+            requests[0]["metadata"]["cost_observability"]["estimate_source"],
+            "provider_reported"
+        );
     }
 
     #[tokio::test]
