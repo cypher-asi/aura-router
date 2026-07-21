@@ -17,13 +17,22 @@ use crate::{
 };
 
 /// Token usage extracted from an SSE stream.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
+    pub cache_creation_5m_input_tokens: u64,
+    pub cache_creation_1h_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    pub web_search_requests: u64,
+    pub web_fetch_requests: u64,
+    pub code_execution_requests: u64,
+    pub service_tier: Option<String>,
+    pub inference_geo: Option<String>,
+    pub speed: Option<String>,
     pub provider_reported_cost_cents: Option<i64>,
+    pub provider_reported_cost_microusd: Option<i64>,
     pub model: Option<String>,
 }
 
@@ -246,14 +255,7 @@ impl OpenAiCompatStream {
 
     fn finish(&mut self, output: &mut VecDeque<Bytes>) -> StreamUsage {
         self.finish_message(output);
-        StreamUsage {
-            input_tokens: self.usage.input_tokens,
-            output_tokens: self.usage.output_tokens,
-            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
-            cache_read_input_tokens: self.usage.cache_read_input_tokens,
-            provider_reported_cost_cents: self.usage.provider_reported_cost_cents,
-            model: self.usage.model.clone(),
-        }
+        self.usage.clone()
     }
 
     fn process_event(&mut self, event_str: &str, output: &mut VecDeque<Bytes>) {
@@ -335,12 +337,11 @@ impl OpenAiCompatStream {
                 })
                 .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
                 .unwrap_or(self.usage.cache_read_input_tokens);
-            if let Some(cost_cents) = usage
-                .get("cost_in_usd_ticks")
-                .and_then(Value::as_u64)
-                .and_then(billing::marked_up_cost_cents_from_usd_ticks)
-            {
-                self.usage.provider_reported_cost_cents = Some(cost_cents);
+            if let Some(ticks) = usage.get("cost_in_usd_ticks").and_then(Value::as_u64) {
+                self.usage.provider_reported_cost_cents =
+                    billing::marked_up_cost_cents_from_usd_ticks(ticks);
+                self.usage.provider_reported_cost_microusd =
+                    billing::provider_cost_microusd_from_usd_ticks(ticks);
             }
             if self.pending_stop_reason.is_some() {
                 self.finish_message(output);
@@ -661,14 +662,7 @@ impl OpenAiResponsesStream {
 
     fn finish(&mut self, output: &mut VecDeque<Bytes>) -> StreamUsage {
         self.finish_message(output);
-        StreamUsage {
-            input_tokens: self.usage.input_tokens,
-            output_tokens: self.usage.output_tokens,
-            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
-            cache_read_input_tokens: self.usage.cache_read_input_tokens,
-            provider_reported_cost_cents: self.usage.provider_reported_cost_cents,
-            model: self.usage.model.clone(),
-        }
+        self.usage.clone()
     }
 
     fn process_event(&mut self, event_str: &str, output: &mut VecDeque<Bytes>) {
@@ -924,12 +918,11 @@ impl OpenAiResponsesStream {
                 .pointer("/input_tokens_details/cached_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(self.usage.cache_read_input_tokens);
-            if let Some(cost_cents) = usage
-                .get("cost_in_usd_ticks")
-                .and_then(Value::as_u64)
-                .and_then(billing::marked_up_cost_cents_from_usd_ticks)
-            {
-                self.usage.provider_reported_cost_cents = Some(cost_cents);
+            if let Some(ticks) = usage.get("cost_in_usd_ticks").and_then(Value::as_u64) {
+                self.usage.provider_reported_cost_cents =
+                    billing::marked_up_cost_cents_from_usd_ticks(ticks);
+                self.usage.provider_reported_cost_microusd =
+                    billing::provider_cost_microusd_from_usd_ticks(ticks);
             }
         }
         if event
@@ -1080,14 +1073,7 @@ impl GoogleStream {
 
     fn finish(&mut self, output: &mut VecDeque<Bytes>) -> StreamUsage {
         self.finish_message(output);
-        StreamUsage {
-            input_tokens: self.usage.input_tokens,
-            output_tokens: self.usage.output_tokens,
-            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
-            cache_read_input_tokens: self.usage.cache_read_input_tokens,
-            provider_reported_cost_cents: self.usage.provider_reported_cost_cents,
-            model: self.usage.model.clone(),
-        }
+        self.usage.clone()
     }
 
     fn process_event(&mut self, event_str: &str, output: &mut VecDeque<Bytes>) {
@@ -1344,21 +1330,7 @@ impl SseParser {
             "message_start" => {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(usage) = value.pointer("/message/usage") {
-                        if let Some(n) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                            self.usage.input_tokens = n;
-                        }
-                        if let Some(n) = usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            self.usage.cache_creation_input_tokens = n;
-                        }
-                        if let Some(n) = usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            self.usage.cache_read_input_tokens = n;
-                        }
+                        capture_anthropic_usage(&mut self.usage, usage);
                     }
                     if let Some(model) = value.pointer("/message/model").and_then(|v| v.as_str()) {
                         self.usage.model = Some(model.to_string());
@@ -1367,11 +1339,8 @@ impl SseParser {
             }
             "message_delta" => {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(n) = value
-                        .pointer("/usage/output_tokens")
-                        .and_then(|v| v.as_u64())
-                    {
-                        self.usage.output_tokens = n;
+                    if let Some(usage) = value.get("usage") {
+                        capture_anthropic_usage(&mut self.usage, usage);
                     }
                 }
             }
@@ -1380,14 +1349,64 @@ impl SseParser {
     }
 
     fn finalize(&self) -> StreamUsage {
-        StreamUsage {
-            input_tokens: self.usage.input_tokens,
-            output_tokens: self.usage.output_tokens,
-            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
-            cache_read_input_tokens: self.usage.cache_read_input_tokens,
-            provider_reported_cost_cents: self.usage.provider_reported_cost_cents,
-            model: self.usage.model.clone(),
-        }
+        self.usage.clone()
+    }
+}
+
+fn capture_anthropic_usage(target: &mut StreamUsage, usage: &Value) {
+    if let Some(n) = usage.get("input_tokens").and_then(Value::as_u64) {
+        target.input_tokens = n;
+    }
+    if let Some(n) = usage.get("output_tokens").and_then(Value::as_u64) {
+        target.output_tokens = n;
+    }
+    if let Some(n) = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        target.cache_creation_input_tokens = n;
+    }
+    if let Some(n) = usage
+        .pointer("/cache_creation/ephemeral_5m_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        target.cache_creation_5m_input_tokens = n;
+    }
+    if let Some(n) = usage
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        target.cache_creation_1h_input_tokens = n;
+    }
+    if let Some(n) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+        target.cache_read_input_tokens = n;
+    }
+    if let Some(n) = usage
+        .pointer("/server_tool_use/web_search_requests")
+        .and_then(Value::as_u64)
+    {
+        target.web_search_requests = n;
+    }
+    if let Some(n) = usage
+        .pointer("/server_tool_use/web_fetch_requests")
+        .and_then(Value::as_u64)
+    {
+        target.web_fetch_requests = n;
+    }
+    if let Some(n) = usage
+        .pointer("/server_tool_use/code_execution_requests")
+        .and_then(Value::as_u64)
+    {
+        target.code_execution_requests = n;
+    }
+    if let Some(value) = usage.get("service_tier").and_then(Value::as_str) {
+        target.service_tier = Some(value.to_string());
+    }
+    if let Some(value) = usage.get("inference_geo").and_then(Value::as_str) {
+        target.inference_geo = Some(value.to_string());
+    }
+    if let Some(value) = usage.get("speed").and_then(Value::as_str) {
+        target.speed = Some(value.to_string());
     }
 }
 
@@ -1433,8 +1452,8 @@ mod tests {
     #[tokio::test]
     async fn anthropic_passthrough_preserves_stream_and_usage() {
         let stream = bytes_stream(vec![
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12},\"model\":\"aura-claude-sonnet-4-6\"}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":8,\"cache_creation\":{\"ephemeral_5m_input_tokens\":3,\"ephemeral_1h_input_tokens\":5},\"cache_read_input_tokens\":20,\"service_tier\":\"standard\",\"inference_geo\":\"us\",\"speed\":\"fast\"},\"model\":\"aura-claude-sonnet-4-6\"}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7,\"server_tool_use\":{\"web_search_requests\":2,\"web_fetch_requests\":1,\"code_execution_requests\":4}}}\n\n",
         ]);
         let (tx, rx) = oneshot::channel();
         let mut tee = TeeStream {
@@ -1457,6 +1476,15 @@ mod tests {
         let usage = rx.await.unwrap();
         assert_eq!(usage.input_tokens, 12);
         assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_creation_5m_input_tokens, 3);
+        assert_eq!(usage.cache_creation_1h_input_tokens, 5);
+        assert_eq!(usage.cache_read_input_tokens, 20);
+        assert_eq!(usage.web_search_requests, 2);
+        assert_eq!(usage.web_fetch_requests, 1);
+        assert_eq!(usage.code_execution_requests, 4);
+        assert_eq!(usage.service_tier.as_deref(), Some("standard"));
+        assert_eq!(usage.inference_geo.as_deref(), Some("us"));
+        assert_eq!(usage.speed.as_deref(), Some("fast"));
         assert!(seen.iter().any(|chunk| chunk.contains("message_start")));
         assert!(seen.iter().any(|chunk| chunk.contains("x_context_usage")));
     }

@@ -33,8 +33,41 @@ pub struct LlmMetric {
 }
 
 const DEFAULT_LLM_MARKUP_MULTIPLIER: f64 = 1.20;
+const DEFAULT_LLM_MARKUP_BPS: u32 = 2_000;
 const USD_TICKS_PER_CENT: f64 = 100_000_000.0;
+const MICRO_USD_PER_CENT: f64 = 10_000.0;
+const ANTHROPIC_WEB_SEARCH_CENTS_PER_REQUEST: f64 = 1.0;
 const OPENAI_LONG_CONTEXT_THRESHOLD: u64 = 272_000;
+
+/// Versioned source identifier emitted with provider-cost estimates.
+pub const PRICING_SOURCE: &str = "aura-router-static-2026-07-22";
+
+/// Detailed provider usage used for cost estimation and billing overrides.
+#[derive(Debug, Clone, Default)]
+pub struct UsageCostInput {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_creation_5m_input_tokens: u64,
+    pub cache_creation_1h_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub web_search_requests: u64,
+    pub web_fetch_requests: u64,
+    pub code_execution_requests: u64,
+    pub service_tier: Option<String>,
+    pub inference_geo: Option<String>,
+    pub speed: Option<String>,
+}
+
+/// Estimated provider cost before AURA's markup, plus the matching debit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageCostEstimate {
+    /// Estimated provider cost in micro-USD ($0.000001).
+    pub provider_cost_microusd: i64,
+    /// User debit after applying AURA's standard markup and cent rounding.
+    pub billed_cost_cents: i64,
+    pub markup_bps: u32,
+}
 
 /// Convert provider-reported USD ticks into marked-up billing cents.
 ///
@@ -48,6 +81,15 @@ pub fn marked_up_cost_cents_from_usd_ticks(ticks: u64) -> Option<i64> {
     let cents = ticks as f64 / USD_TICKS_PER_CENT * DEFAULT_LLM_MARKUP_MULTIPLIER;
     let rounded = cents.round() as i64;
     Some(rounded.max(1))
+}
+
+/// Convert provider-reported USD ticks into micro-USD without AURA markup.
+pub fn provider_cost_microusd_from_usd_ticks(ticks: u64) -> Option<i64> {
+    if ticks == 0 {
+        return None;
+    }
+    let micro_usd = ticks as f64 / (USD_TICKS_PER_CENT / MICRO_USD_PER_CENT);
+    Some(micro_usd.round() as i64)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,13 +124,61 @@ pub fn cache_aware_cost_cents(
     if cache_creation_input_tokens == 0 && cache_read_input_tokens == 0 {
         return None;
     }
-    let rates = cache_aware_rates(provider, model)?;
+    estimate_usage_cost(
+        provider,
+        model,
+        &UsageCostInput {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            ..UsageCostInput::default()
+        },
+    )
+    .map(|estimate| estimate.billed_cost_cents)
+}
+
+/// Estimate provider list-price cost with micro-USD precision.
+///
+/// Anthropic's response includes details that the generic z-billing token
+/// metric cannot represent: 5-minute vs 1-hour cache writes, cache reads,
+/// server-side web searches, service tier, and inference geography. Keeping
+/// this estimate separate from the rounded user debit makes margin analysis
+/// meaningful even for sub-cent requests.
+pub fn estimate_usage_cost(
+    provider: &str,
+    model: &str,
+    usage: &UsageCostInput,
+) -> Option<UsageCostEstimate> {
+    estimate_usage_cost_on(provider, model, usage, chrono::Utc::now().date_naive())
+}
+
+fn estimate_usage_cost_on(
+    provider: &str,
+    model: &str,
+    usage: &UsageCostInput,
+    date: chrono::NaiveDate,
+) -> Option<UsageCostEstimate> {
+    let rates = cache_aware_rates_on(provider, model, date)?;
+
+    let cache_creation_split = usage
+        .cache_creation_5m_input_tokens
+        .saturating_add(usage.cache_creation_1h_input_tokens);
+    let legacy_5m_tokens = usage
+        .cache_creation_input_tokens
+        .saturating_sub(cache_creation_split);
+    let cache_creation_5m_tokens = usage
+        .cache_creation_5m_input_tokens
+        .saturating_add(legacy_5m_tokens);
+    let cache_creation_tokens =
+        cache_creation_5m_tokens.saturating_add(usage.cache_creation_1h_input_tokens);
 
     let new_input_tokens = if rates.input_tokens_is_new_only {
-        input_tokens
+        usage.input_tokens
     } else {
-        input_tokens
-            .saturating_sub(cache_creation_input_tokens.saturating_add(cache_read_input_tokens))
+        usage
+            .input_tokens
+            .saturating_sub(cache_creation_tokens.saturating_add(usage.cache_read_input_tokens))
     };
     let normalized_model = model.strip_prefix("openai/").unwrap_or(model);
     let is_long_context_model = matches!(
@@ -97,34 +187,101 @@ pub fn cache_aware_cost_cents(
     ) || normalized_model.starts_with("aura-gpt-5-6-")
         || normalized_model.starts_with("gpt-5.6");
     let is_long_context_openai = provider == "openai"
-        && input_tokens > OPENAI_LONG_CONTEXT_THRESHOLD
+        && usage.input_tokens > OPENAI_LONG_CONTEXT_THRESHOLD
         && is_long_context_model;
     let input_multiplier = if is_long_context_openai { 2.0 } else { 1.0 };
     let output_multiplier = if is_long_context_openai { 1.5 } else { 1.0 };
+    let speed_multiplier = anthropic_fast_mode_multiplier(provider, model, usage.speed.as_deref());
 
-    let total_cents =
-        ((new_input_tokens as f64 * rates.new_input_cents_per_million * input_multiplier)
-            + (cache_creation_input_tokens as f64
-                * rates.cache_write_input_cents_per_million
-                * input_multiplier)
-            + (cache_read_input_tokens as f64
-                * rates.cache_read_input_cents_per_million
-                * input_multiplier)
-            + (output_tokens as f64 * rates.output_cents_per_million * output_multiplier))
-            * DEFAULT_LLM_MARKUP_MULTIPLIER
-            / 1_000_000.0;
-
-    let rounded = total_cents.round() as i64;
-    if rounded == 0 && (input_tokens > 0 || output_tokens > 0) {
-        Some(1)
+    let geo_multiplier = if provider == "anthropic"
+        && usage.inference_geo.as_deref() == Some("us")
+        && anthropic_supports_us_geo_pricing(model)
+    {
+        1.10
     } else {
-        Some(rounded)
+        1.0
+    };
+    let cache_write_1h_rate = if provider == "anthropic" {
+        rates.new_input_cents_per_million * 2.0
+    } else {
+        rates.cache_write_input_cents_per_million
+    };
+
+    let token_cents = ((new_input_tokens as f64
+        * rates.new_input_cents_per_million
+        * input_multiplier
+        * speed_multiplier)
+        + (cache_creation_5m_tokens as f64
+            * rates.cache_write_input_cents_per_million
+            * input_multiplier
+            * speed_multiplier)
+        + (usage.cache_creation_1h_input_tokens as f64
+            * cache_write_1h_rate
+            * input_multiplier
+            * speed_multiplier)
+        + (usage.cache_read_input_tokens as f64
+            * rates.cache_read_input_cents_per_million
+            * input_multiplier
+            * speed_multiplier)
+        + (usage.output_tokens as f64
+            * rates.output_cents_per_million
+            * output_multiplier
+            * speed_multiplier))
+        * geo_multiplier
+        / 1_000_000.0;
+    let server_tool_cents = if provider == "anthropic" {
+        usage.web_search_requests as f64 * ANTHROPIC_WEB_SEARCH_CENTS_PER_REQUEST
+    } else {
+        0.0
+    };
+    let provider_cents = token_cents + server_tool_cents;
+    let provider_cost_microusd = (provider_cents * MICRO_USD_PER_CENT).round() as i64;
+    let rounded = (provider_cents * DEFAULT_LLM_MARKUP_MULTIPLIER).round() as i64;
+    let has_billable_usage = usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || cache_creation_tokens > 0
+        || usage.cache_read_input_tokens > 0
+        || usage.web_search_requests > 0;
+    let billed_cost_cents = if rounded == 0 && has_billable_usage {
+        1
+    } else {
+        rounded
+    };
+
+    Some(UsageCostEstimate {
+        provider_cost_microusd,
+        billed_cost_cents,
+        markup_bps: DEFAULT_LLM_MARKUP_BPS,
+    })
+}
+
+fn anthropic_fast_mode_multiplier(provider: &str, model: &str, speed: Option<&str>) -> f64 {
+    if provider != "anthropic" || speed != Some("fast") {
+        return 1.0;
+    }
+    let model = model.strip_prefix("anthropic/").unwrap_or(model);
+    match model {
+        "claude-opus-4-8" | "aura-claude-opus-4-8" => 2.0,
+        "claude-opus-4-7" | "aura-claude-opus-4-7" => 6.0,
+        _ => 1.0,
     }
 }
 
-fn cache_aware_rates(provider: &str, model: &str) -> Option<CacheAwareRates> {
+fn anthropic_supports_us_geo_pricing(model: &str) -> bool {
+    let model = model.strip_prefix("anthropic/").unwrap_or(model);
+    !matches!(
+        model,
+        "claude-haiku-4-5" | "claude-haiku-4-5-20251001" | "aura-claude-haiku-4-5"
+    )
+}
+
+fn cache_aware_rates_on(
+    provider: &str,
+    model: &str,
+    date: chrono::NaiveDate,
+) -> Option<CacheAwareRates> {
     match provider {
-        "anthropic" => anthropic_rates(model),
+        "anthropic" => anthropic_rates_on(model, date),
         "deepseek" => deepseek_rates(model),
         "openai" => openai_rates(model),
         "xai" => xai_rates(model),
@@ -236,7 +393,7 @@ fn google_rates(model: &str) -> Option<CacheAwareRates> {
     }
 }
 
-fn anthropic_rates(model: &str) -> Option<CacheAwareRates> {
+fn anthropic_rates_on(model: &str, date: chrono::NaiveDate) -> Option<CacheAwareRates> {
     let model = model.strip_prefix("anthropic/").unwrap_or(model);
 
     // Anthropic returns `input_tokens` as the new (uncached) portion only;
@@ -262,16 +419,26 @@ fn anthropic_rates(model: &str) -> Option<CacheAwareRates> {
             output_cents_per_million: 2500.0,
             input_tokens_is_new_only: true,
         }),
-        "claude-sonnet-4-6"
-        | "aura-claude-sonnet-4-6"
-        | "claude-sonnet-5"
-        | "aura-claude-sonnet-5" => Some(CacheAwareRates {
+        "claude-sonnet-4-6" | "aura-claude-sonnet-4-6" => Some(CacheAwareRates {
             new_input_cents_per_million: 300.0,
             cache_write_input_cents_per_million: 375.0,
             cache_read_input_cents_per_million: 30.0,
             output_cents_per_million: 1500.0,
             input_tokens_is_new_only: true,
         }),
+        "claude-sonnet-5" | "aura-claude-sonnet-5" => {
+            let promotional =
+                date <= chrono::NaiveDate::from_ymd_opt(2026, 8, 31).expect("valid pricing date");
+            let base_input = if promotional { 200.0 } else { 300.0 };
+            let output = if promotional { 1000.0 } else { 1500.0 };
+            Some(CacheAwareRates {
+                new_input_cents_per_million: base_input,
+                cache_write_input_cents_per_million: base_input * 1.25,
+                cache_read_input_cents_per_million: base_input * 0.10,
+                output_cents_per_million: output,
+                input_tokens_is_new_only: true,
+            })
+        }
         "claude-haiku-4-5" | "claude-haiku-4-5-20251001" | "aura-claude-haiku-4-5" => {
             Some(CacheAwareRates {
                 new_input_cents_per_million: 100.0,
@@ -599,6 +766,7 @@ pub async fn report_usage(
     input_tokens: u64,
     output_tokens: u64,
     cost_cents: Option<i64>,
+    metadata: Option<serde_json::Value>,
 ) -> Result<UsageResponse, AppError> {
     let url = format!("{billing_url}/v1/usage");
     let mut body = serde_json::json!({
@@ -614,6 +782,9 @@ pub async fn report_usage(
     });
     if let Some(cost_cents) = cost_cents {
         body["cost_cents"] = serde_json::Value::from(cost_cents);
+    }
+    if let Some(metadata) = metadata {
+        body["metadata"] = metadata;
     }
 
     let resp = client
@@ -641,7 +812,10 @@ pub async fn report_usage(
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_aware_cost_cents, marked_up_cost_cents_from_usd_ticks};
+    use super::{
+        cache_aware_cost_cents, estimate_usage_cost_on, marked_up_cost_cents_from_usd_ticks,
+        provider_cost_microusd_from_usd_ticks, UsageCostInput,
+    };
 
     #[test]
     fn deepseek_cache_aware_cost_uses_cache_buckets_and_markup() {
@@ -780,6 +954,10 @@ mod tests {
     #[test]
     fn provider_reported_usd_ticks_convert_to_marked_up_cents() {
         assert_eq!(marked_up_cost_cents_from_usd_ticks(250_000_000), Some(3));
+        assert_eq!(
+            provider_cost_microusd_from_usd_ticks(250_000_000),
+            Some(25_000)
+        );
         assert_eq!(marked_up_cost_cents_from_usd_ticks(1), Some(1));
         assert_eq!(marked_up_cost_cents_from_usd_ticks(0), None);
     }
@@ -852,6 +1030,77 @@ mod tests {
             cache_aware_cost_cents("anthropic", "claude-sonnet-4-6", 0, 600, 50_000, 0),
             Some(24)
         );
+    }
+
+    #[test]
+    fn anthropic_estimate_includes_cache_ttl_tools_and_geography() {
+        let estimate = estimate_usage_cost_on(
+            "anthropic",
+            "claude-sonnet-5",
+            &UsageCostInput {
+                input_tokens: 100_000,
+                output_tokens: 10_000,
+                cache_creation_input_tokens: 300_000,
+                cache_creation_5m_input_tokens: 200_000,
+                cache_creation_1h_input_tokens: 100_000,
+                cache_read_input_tokens: 500_000,
+                web_search_requests: 2,
+                web_fetch_requests: 3,
+                service_tier: Some("standard".to_string()),
+                inference_geo: Some("us".to_string()),
+                ..UsageCostInput::default()
+            },
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
+        )
+        .expect("Sonnet 5 pricing");
+
+        // Promotional token cost is 130 cents, US-only inference adds 10%, and two web
+        // searches add 2 cents. Web fetch has no separate request charge.
+        assert_eq!(estimate.provider_cost_microusd, 1_450_000);
+        assert_eq!(estimate.billed_cost_cents, 174);
+        assert_eq!(estimate.markup_bps, 2_000);
+    }
+
+    #[test]
+    fn sonnet_5_introductory_pricing_switches_after_august() {
+        let usage = UsageCostInput {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..UsageCostInput::default()
+        };
+        let promotional = estimate_usage_cost_on(
+            "anthropic",
+            "claude-sonnet-5",
+            &usage,
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
+        )
+        .unwrap();
+        let standard = estimate_usage_cost_on(
+            "anthropic",
+            "claude-sonnet-5",
+            &usage,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(promotional.provider_cost_microusd, 12_000_000);
+        assert_eq!(standard.provider_cost_microusd, 18_000_000);
+    }
+
+    #[test]
+    fn anthropic_fast_mode_uses_premium_opus_rates() {
+        let usage = UsageCostInput {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            speed: Some("fast".to_string()),
+            ..UsageCostInput::default()
+        };
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 22).unwrap();
+        let opus_48 = estimate_usage_cost_on("anthropic", "claude-opus-4-8", &usage, date).unwrap();
+        let opus_47 = estimate_usage_cost_on("anthropic", "claude-opus-4-7", &usage, date).unwrap();
+
+        assert_eq!(opus_48.provider_cost_microusd, 60_000_000);
+        assert_eq!(opus_47.provider_cost_microusd, 180_000_000);
     }
 
     #[test]
