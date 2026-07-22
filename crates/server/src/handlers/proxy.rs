@@ -182,6 +182,8 @@ pub async fn messages(
         return Ok(normalize_upstream_error(upstream_status, &error_body));
     }
 
+    let provider_request_id = upstream_request_id(&upstream_resp);
+
     if is_streaming {
         return handle_streaming(
             auth,
@@ -191,6 +193,7 @@ pub async fn messages(
             openai_api,
             provider_name,
             upstream_resp,
+            provider_request_id,
             session_ctx,
             user_content,
             request_start,
@@ -205,6 +208,7 @@ pub async fn messages(
         provider_name,
         openai_api,
         upstream_resp,
+        provider_request_id,
         session_ctx,
         user_content,
         request_start,
@@ -249,6 +253,7 @@ async fn handle_non_streaming(
     provider_name: &str,
     openai_api: providers::OpenAiApi,
     upstream_resp: reqwest::Response,
+    provider_request_id: String,
     session_ctx: Option<storage::SessionContext>,
     user_content: String,
     request_start: std::time::Instant,
@@ -365,6 +370,7 @@ async fn handle_non_streaming(
         provider_reported_cost_cents,
         provider_reported_cost_microusd,
         duration_ms,
+        billing_event_id(provider_name, &provider_request_id),
     );
 
     // Store messages to aura-storage if session context is present
@@ -415,6 +421,10 @@ async fn handle_non_streaming(
                 header::HeaderName::from_static("x-model-max-tokens"),
                 max_tokens.to_string(),
             ),
+            (
+                header::HeaderName::from_static("x-request-id"),
+                provider_request_id,
+            ),
         ],
         Body::from(normalized_response_bytes),
     )
@@ -430,13 +440,20 @@ async fn handle_streaming(
     openai_api: providers::OpenAiApi,
     provider_name: &str,
     upstream_resp: reqwest::Response,
+    provider_request_id: String,
     session_ctx: Option<storage::SessionContext>,
     user_content: String,
     request_start: std::time::Instant,
 ) -> Result<Response, AppError> {
     let model_owned = model.to_string();
     let provider_owned = provider_name.to_string();
-    let (tee_stream, usage_rx) = stream::proxy_stream(provider, openai_api, model, upstream_resp);
+    let (tee_stream, usage_rx) = stream::proxy_stream(
+        provider,
+        openai_api,
+        model,
+        upstream_resp,
+        provider_request_id.clone(),
+    );
 
     // Spawn task to handle billing + storage after stream completes
     let billing_state = state.clone();
@@ -446,6 +463,7 @@ async fn handle_streaming(
     let stream_agent_id = session_ctx
         .as_ref()
         .and_then(|c| c.project_agent_id.clone());
+    let billing_provider_request_id = provider_request_id.clone();
     tokio::spawn(async move {
         if let Ok(usage) = usage_rx.await {
             let duration_ms = request_start.elapsed().as_millis() as u64;
@@ -475,27 +493,30 @@ async fn handle_streaming(
                 usage.provider_reported_cost_cents,
                 usage.provider_reported_cost_microusd,
                 duration_ms,
+                billing_event_id(&provider_owned, &billing_provider_request_id),
             );
 
             // Store messages to aura-storage if session context is present
-            if let Some(ctx) = session_ctx {
-                if let (Some(ref storage_url), Some(ref storage_token)) = (
-                    &billing_state.aura_storage_url,
-                    &billing_state.aura_storage_token,
-                ) {
-                    storage::store_events(
-                        &billing_state.http_client,
-                        storage_url,
-                        storage_token,
-                        &ctx,
-                        &user_id,
-                        &user_content,
-                        "[streamed response]",
-                        None,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                    )
-                    .await;
+            if usage.completed {
+                if let Some(ctx) = session_ctx {
+                    if let (Some(ref storage_url), Some(ref storage_token)) = (
+                        &billing_state.aura_storage_url,
+                        &billing_state.aura_storage_token,
+                    ) {
+                        storage::store_events(
+                            &billing_state.http_client,
+                            storage_url,
+                            storage_token,
+                            &ctx,
+                            &user_id,
+                            &user_content,
+                            "[streamed response]",
+                            None,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -516,6 +537,10 @@ async fn handle_streaming(
             (
                 header::HeaderName::from_static("x-model-max-tokens"),
                 max_tokens.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-request-id"),
+                provider_request_id,
             ),
         ],
         body,
@@ -725,8 +750,8 @@ fn spawn_post_request_tasks(
     provider_reported_cost_cents: Option<i64>,
     provider_reported_cost_microusd: Option<i64>,
     duration_ms: u64,
+    event_id: String,
 ) {
-    let event_id = uuid::Uuid::new_v4().to_string();
     let model_owned = model.to_string();
     let user_id_owned = user_id.to_string();
     let provider_owned = provider_name.to_string();
@@ -845,6 +870,22 @@ fn spawn_post_request_tasks(
             .await;
         });
     }
+}
+
+fn upstream_request_id(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get("x-request-id")
+        .or_else(|| response.headers().get("request-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+fn billing_event_id(provider: &str, provider_request_id: &str) -> String {
+    format!("llm:{provider}:{provider_request_id}")
 }
 
 #[cfg(test)]
@@ -1532,6 +1573,7 @@ mod tests {
             None,
             None,
             123,
+            "test-event-deepseek".to_string(),
         );
 
         for _ in 0..20 {
@@ -1583,6 +1625,7 @@ mod tests {
             None,
             None,
             123,
+            "test-event-openai".to_string(),
         );
 
         for _ in 0..20 {
@@ -1639,6 +1682,7 @@ mod tests {
             None,
             None,
             123,
+            "test-event-anthropic".to_string(),
         );
 
         for _ in 0..20 {
@@ -1716,6 +1760,7 @@ mod tests {
             Some(3),
             Some(25_000),
             123,
+            "test-event-xai".to_string(),
         );
 
         for _ in 0..20 {
