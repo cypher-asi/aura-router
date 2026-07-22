@@ -34,6 +34,10 @@ pub struct StreamUsage {
     pub provider_reported_cost_cents: Option<i64>,
     pub provider_reported_cost_microusd: Option<i64>,
     pub model: Option<String>,
+    /// True only after the upstream protocol emitted a terminal success
+    /// marker. Observed usage from interrupted streams is still billable,
+    /// but those streams must not be persisted as completed assistant turns.
+    pub completed: bool,
 }
 
 /// Proxy an SSE stream from the upstream provider to the client,
@@ -43,8 +47,9 @@ pub fn proxy_stream(
     api: OpenAiApi,
     requested_model: &str,
     upstream: reqwest::Response,
+    provider_request_id: String,
 ) -> (
-    impl futures_util::Stream<Item = Result<Bytes, reqwest::Error>>,
+    impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>>,
     oneshot::Receiver<StreamUsage>,
 ) {
     let (usage_tx, usage_rx) = oneshot::channel();
@@ -56,6 +61,7 @@ pub fn proxy_stream(
         usage_tx: Some(usage_tx),
         finished: false,
         pending_output: VecDeque::new(),
+        provider_request_id,
     };
 
     (tee_stream, usage_rx)
@@ -69,6 +75,7 @@ struct TeeStream<S> {
     usage_tx: Option<oneshot::Sender<StreamUsage>>,
     finished: bool,
     pending_output: VecDeque<Bytes>,
+    provider_request_id: String,
 }
 
 impl<S, E> futures_util::Stream for TeeStream<S>
@@ -76,7 +83,7 @@ where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
 {
-    type Item = Result<Bytes, E>;
+    type Item = Result<Bytes, std::convert::Infallible>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -102,25 +109,50 @@ where
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
                     self.finished = true;
-                    return std::task::Poll::Ready(Some(Err(e)));
+                    let terminal_error_emitted = self.adapter.terminal_error_emitted();
+                    let usage = self.adapter.abort();
+                    if let Some(tx) = self.usage_tx.take() {
+                        let _ = tx.send(usage.clone());
+                    }
+                    // Some providers close the transport noisily after a
+                    // protocol-level completion marker. Do not turn that
+                    // into a retry that would duplicate a completed turn.
+                    if usage.completed || terminal_error_emitted {
+                        return std::task::Poll::Ready(None);
+                    }
+                    tracing::warn!(
+                        error = %e,
+                        provider_request_id = %self.provider_request_id,
+                        "provider SSE transport closed before message completion"
+                    );
+                    return std::task::Poll::Ready(Some(Ok(interrupted_stream_error(
+                        &self.provider_request_id,
+                    ))));
                 }
                 std::task::Poll::Ready(None) => {
                     self.finished = true;
                     let mut emitted = VecDeque::new();
+                    let terminal_error_emitted = self.adapter.terminal_error_emitted();
                     let usage = self.adapter.finish(&mut emitted);
                     self.pending_output.extend(emitted);
-                    let model = usage.model.as_deref().unwrap_or("unknown");
-                    let max_tokens = providers::max_context_tokens(model);
-                    let context_usage = if max_tokens > 0 {
-                        usage.input_tokens as f64 / max_tokens as f64
-                    } else {
-                        0.0
-                    };
+                    if usage.completed {
+                        let model = usage.model.as_deref().unwrap_or("unknown");
+                        let max_tokens = providers::max_context_tokens(model);
+                        let context_usage = if max_tokens > 0 {
+                            usage.input_tokens as f64 / max_tokens as f64
+                        } else {
+                            0.0
+                        };
 
-                    self.pending_output.push_back(Bytes::from(format!(
-                        "event: x_context_usage\ndata: {{\"contextUsage\":{context_usage:.4},\"inputTokens\":{},\"outputTokens\":{},\"maxTokens\":{max_tokens}}}\n\n",
-                        usage.input_tokens, usage.output_tokens
-                    )));
+                        self.pending_output.push_back(Bytes::from(format!(
+                            "event: x_context_usage\ndata: {{\"contextUsage\":{context_usage:.4},\"inputTokens\":{},\"outputTokens\":{},\"maxTokens\":{max_tokens}}}\n\n",
+                            usage.input_tokens, usage.output_tokens
+                        )));
+                    } else if !terminal_error_emitted {
+                        let provider_request_id = self.provider_request_id.clone();
+                        self.pending_output
+                            .push_back(interrupted_stream_error(&provider_request_id));
+                    }
 
                     if let Some(tx) = self.usage_tx.take() {
                         let _ = tx.send(usage);
@@ -183,6 +215,38 @@ impl StreamAdapter {
             Self::Google(adapter) => adapter.finish(output),
         }
     }
+
+    /// Return usage observed before an interrupted stream without emitting
+    /// synthetic success frames such as `message_stop`.
+    fn abort(&mut self) -> StreamUsage {
+        match self {
+            Self::Anthropic(adapter) => adapter.parser.finalize(),
+            Self::OpenAi(adapter) => {
+                let mut usage = adapter.usage.clone();
+                usage.completed = adapter.finalized && !adapter.terminal_error;
+                usage
+            }
+            Self::OpenAiResponses(adapter) => {
+                let mut usage = adapter.usage.clone();
+                usage.completed = adapter.finalized && !adapter.terminal_error;
+                usage
+            }
+            Self::Google(adapter) => {
+                let mut usage = adapter.usage.clone();
+                usage.completed = adapter.finalized && !adapter.terminal_error;
+                usage
+            }
+        }
+    }
+
+    fn terminal_error_emitted(&self) -> bool {
+        match self {
+            Self::Anthropic(adapter) => adapter.parser.terminal_error,
+            Self::OpenAi(adapter) => adapter.terminal_error,
+            Self::OpenAiResponses(adapter) => adapter.terminal_error,
+            Self::Google(adapter) => adapter.terminal_error,
+        }
+    }
 }
 
 struct AnthropicPassthrough {
@@ -211,6 +275,7 @@ struct OpenAiCompatStream {
     tool_blocks: BTreeMap<usize, ToolBlockState>,
     pending_stop_reason: Option<String>,
     finalized: bool,
+    terminal_error: bool,
 }
 
 #[derive(Default)]
@@ -239,6 +304,7 @@ impl OpenAiCompatStream {
             tool_blocks: BTreeMap::new(),
             pending_stop_reason: None,
             finalized: false,
+            terminal_error: false,
         }
     }
 
@@ -254,8 +320,12 @@ impl OpenAiCompatStream {
     }
 
     fn finish(&mut self, output: &mut VecDeque<Bytes>) -> StreamUsage {
-        self.finish_message(output);
-        self.usage.clone()
+        if self.pending_stop_reason.is_some() {
+            self.finish_message(output);
+        }
+        let mut usage = self.usage.clone();
+        usage.completed = self.finalized && !self.terminal_error;
+        usage
     }
 
     fn process_event(&mut self, event_str: &str, output: &mut VecDeque<Bytes>) {
@@ -290,6 +360,7 @@ impl OpenAiCompatStream {
                     }
                 }),
             ));
+            self.terminal_error = true;
             self.finalized = true;
             return;
         };
@@ -617,6 +688,7 @@ struct OpenAiResponsesStream {
     saw_tool_call: bool,
     incomplete_max_tokens: bool,
     finalized: bool,
+    terminal_error: bool,
 }
 
 #[derive(Default)]
@@ -646,6 +718,7 @@ impl OpenAiResponsesStream {
             saw_tool_call: false,
             incomplete_max_tokens: false,
             finalized: false,
+            terminal_error: false,
         }
     }
 
@@ -660,9 +733,10 @@ impl OpenAiResponsesStream {
         }
     }
 
-    fn finish(&mut self, output: &mut VecDeque<Bytes>) -> StreamUsage {
-        self.finish_message(output);
-        self.usage.clone()
+    fn finish(&mut self, _output: &mut VecDeque<Bytes>) -> StreamUsage {
+        let mut usage = self.usage.clone();
+        usage.completed = self.finalized && !self.terminal_error;
+        usage
     }
 
     fn process_event(&mut self, event_str: &str, output: &mut VecDeque<Bytes>) {
@@ -687,6 +761,15 @@ impl OpenAiResponsesStream {
             return;
         }
         let Ok(event) = serde_json::from_str::<Value>(&data) else {
+            output.push_back(anthropic_sse(
+                "error",
+                json!({
+                    "type": "error",
+                    "error": { "message": "malformed OpenAI Responses SSE JSON" }
+                }),
+            ));
+            self.terminal_error = true;
+            self.finalized = true;
             return;
         };
 
@@ -729,6 +812,7 @@ impl OpenAiResponsesStream {
                         "error": { "message": message }
                     }),
                 ));
+                self.terminal_error = true;
                 self.finalized = true;
             }
             _ => {}
@@ -1039,6 +1123,7 @@ struct GoogleStream {
     saw_tool_call: bool,
     pending_finish_reason: Option<String>,
     finalized: bool,
+    terminal_error: bool,
 }
 
 impl GoogleStream {
@@ -1057,6 +1142,7 @@ impl GoogleStream {
             saw_tool_call: false,
             pending_finish_reason: None,
             finalized: false,
+            terminal_error: false,
         }
     }
 
@@ -1072,8 +1158,12 @@ impl GoogleStream {
     }
 
     fn finish(&mut self, output: &mut VecDeque<Bytes>) -> StreamUsage {
-        self.finish_message(output);
-        self.usage.clone()
+        if self.pending_finish_reason.is_some() {
+            self.finish_message(output);
+        }
+        let mut usage = self.usage.clone();
+        usage.completed = self.finalized && !self.terminal_error;
+        usage
     }
 
     fn process_event(&mut self, event_str: &str, output: &mut VecDeque<Bytes>) {
@@ -1095,6 +1185,15 @@ impl GoogleStream {
             return;
         }
         let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
+            output.push_back(anthropic_sse(
+                "error",
+                json!({
+                    "type": "error",
+                    "error": { "message": "malformed Google SSE JSON" }
+                }),
+            ));
+            self.terminal_error = true;
+            self.finalized = true;
             return;
         };
 
@@ -1289,6 +1388,8 @@ struct SseParser {
     buffer: String,
     current_event: Option<String>,
     usage: StreamUsage,
+    completed: bool,
+    terminal_error: bool,
 }
 
 impl SseParser {
@@ -1297,6 +1398,8 @@ impl SseParser {
             buffer: String::new(),
             current_event: None,
             usage: StreamUsage::default(),
+            completed: false,
+            terminal_error: false,
         }
     }
 
@@ -1344,13 +1447,35 @@ impl SseParser {
                     }
                 }
             }
+            "message_stop" => {
+                self.completed = true;
+            }
+            "error" => {
+                self.terminal_error = true;
+            }
             _ => {}
         }
     }
 
     fn finalize(&self) -> StreamUsage {
-        self.usage.clone()
+        let mut usage = self.usage.clone();
+        usage.completed = self.completed;
+        usage
     }
+}
+
+fn interrupted_stream_error(provider_request_id: &str) -> Bytes {
+    anthropic_sse(
+        "error",
+        json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "Provider stream interrupted before completion",
+            },
+            "request_id": provider_request_id,
+        }),
+    )
 }
 
 fn capture_anthropic_usage(target: &mut StreamUsage, usage: &Value) {
@@ -1454,6 +1579,7 @@ mod tests {
         let stream = bytes_stream(vec![
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":8,\"cache_creation\":{\"ephemeral_5m_input_tokens\":3,\"ephemeral_1h_input_tokens\":5},\"cache_read_input_tokens\":20,\"service_tier\":\"standard\",\"inference_geo\":\"us\",\"speed\":\"fast\"},\"model\":\"aura-claude-sonnet-4-6\"}}\n\n",
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7,\"server_tool_use\":{\"web_search_requests\":2,\"web_fetch_requests\":1,\"code_execution_requests\":4}}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
         let (tx, rx) = oneshot::channel();
         let mut tee = TeeStream {
@@ -1466,6 +1592,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_anthropic".to_string(),
         };
 
         let mut seen = Vec::new();
@@ -1487,6 +1614,139 @@ mod tests {
         assert_eq!(usage.speed.as_deref(), Some("fast"));
         assert!(seen.iter().any(|chunk| chunk.contains("message_start")));
         assert!(seen.iter().any(|chunk| chunk.contains("x_context_usage")));
+        assert!(usage.completed);
+    }
+
+    #[tokio::test]
+    async fn transport_failure_emits_structured_error_and_reports_incomplete_usage() {
+        let stream = futures_util::stream::iter(vec![
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5},\"model\":\"claude-sonnet-5\"}}\n\n",
+            )),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection closed before message completed",
+            )),
+        ]);
+        let (tx, rx) = oneshot::channel();
+        let mut tee = TeeStream {
+            inner: Box::pin(stream),
+            adapter: StreamAdapter::new(
+                Provider::Anthropic,
+                OpenAiApi::ChatCompletions,
+                "aura-claude-sonnet-5",
+            ),
+            usage_tx: Some(tx),
+            finished: false,
+            pending_output: VecDeque::new(),
+            provider_request_id: "req_interrupted".to_string(),
+        };
+
+        let mut emitted = Vec::new();
+        while let Some(chunk) = tee.next().await {
+            emitted.push(String::from_utf8_lossy(&chunk.unwrap()).to_string());
+        }
+        let joined = emitted.join("");
+        assert!(joined.contains("Provider stream interrupted before completion"));
+        assert!(joined.contains("req_interrupted"));
+        assert!(!joined.contains("message_stop"));
+
+        let usage = rx.await.unwrap();
+        assert_eq!(usage.input_tokens, 5);
+        assert!(!usage.completed);
+    }
+
+    #[tokio::test]
+    async fn clean_eof_without_completion_is_not_synthesized_as_success() {
+        let stream = bytes_stream(vec![
+            "data: {\"id\":\"chatcmpl-cut-off\",\"model\":\"gpt-4.1\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        ]);
+        let (tx, rx) = oneshot::channel();
+        let mut tee = TeeStream {
+            inner: Box::pin(stream),
+            adapter: StreamAdapter::new(
+                Provider::OpenAi,
+                OpenAiApi::ChatCompletions,
+                "aura-gpt-4.1",
+            ),
+            usage_tx: Some(tx),
+            finished: false,
+            pending_output: VecDeque::new(),
+            provider_request_id: "req_clean_eof".to_string(),
+        };
+
+        let mut emitted = Vec::new();
+        while let Some(chunk) = tee.next().await {
+            emitted.push(String::from_utf8_lossy(&chunk.unwrap()).to_string());
+        }
+        let joined = emitted.join("");
+        assert!(joined.contains("Provider stream interrupted before completion"));
+        assert!(!joined.contains("message_stop"));
+        assert!(!rx.await.unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn upstream_error_event_is_not_followed_by_duplicate_interruption_error() {
+        let stream = bytes_stream(vec![
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"upstream failed\"}}\n\n",
+        ]);
+        let (tx, rx) = oneshot::channel();
+        let mut tee = TeeStream {
+            inner: Box::pin(stream),
+            adapter: StreamAdapter::new(
+                Provider::Anthropic,
+                OpenAiApi::ChatCompletions,
+                "aura-claude-sonnet-5",
+            ),
+            usage_tx: Some(tx),
+            finished: false,
+            pending_output: VecDeque::new(),
+            provider_request_id: "req_upstream_error".to_string(),
+        };
+
+        let mut emitted = Vec::new();
+        while let Some(chunk) = tee.next().await {
+            emitted.push(String::from_utf8_lossy(&chunk.unwrap()).to_string());
+        }
+        let joined = emitted.join("");
+        assert_eq!(joined.matches("event: error").count(), 1);
+        assert!(!joined.contains("Provider stream interrupted before completion"));
+        assert!(!rx.await.unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn noisy_transport_close_after_completion_does_not_trigger_retry() {
+        let stream = futures_util::stream::iter(vec![
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "late transport close",
+            )),
+        ]);
+        let (tx, rx) = oneshot::channel();
+        let mut tee = TeeStream {
+            inner: Box::pin(stream),
+            adapter: StreamAdapter::new(
+                Provider::Anthropic,
+                OpenAiApi::ChatCompletions,
+                "aura-claude-sonnet-5",
+            ),
+            usage_tx: Some(tx),
+            finished: false,
+            pending_output: VecDeque::new(),
+            provider_request_id: "req_completed".to_string(),
+        };
+
+        let mut emitted = Vec::new();
+        while let Some(chunk) = tee.next().await {
+            emitted.push(String::from_utf8_lossy(&chunk.unwrap()).to_string());
+        }
+        assert!(!emitted
+            .join("")
+            .contains("Provider stream interrupted before completion"));
+        assert!(rx.await.unwrap().completed);
     }
 
     #[tokio::test]
@@ -1507,6 +1767,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_google".to_string(),
         };
 
         let mut seen = Vec::new();
@@ -1548,6 +1809,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_responses".to_string(),
         };
 
         let mut emitted = Vec::new();
@@ -1608,6 +1870,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_xai".to_string(),
         };
 
         let mut emitted = Vec::new();
@@ -1647,6 +1910,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_openai_text".to_string(),
         };
 
         let mut emitted = Vec::new();
@@ -1695,6 +1959,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_openai_tool".to_string(),
         };
 
         let mut emitted = Vec::new();
@@ -1736,6 +2001,7 @@ mod tests {
             usage_tx: Some(tx),
             finished: false,
             pending_output: VecDeque::new(),
+            provider_request_id: "req_deepseek".to_string(),
         };
 
         while let Some(chunk) = tee.next().await {
