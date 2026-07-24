@@ -5,11 +5,15 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-use aura_router_auth::{AuthUser, AuthUserOrGuest};
+use aura_router_auth::{AuthUser, AuthUserOrGuest, PUBLIC_GUEST_USER_ID};
 use aura_router_core::AppError;
 use aura_router_proxy::{anthropic_compat, billing, providers, stats, storage, stream};
 
 use crate::state::AppState;
+
+fn is_public_guest(user_id: &str) -> bool {
+    user_id == PUBLIC_GUEST_USER_ID
+}
 
 /// POST /v1/messages — Anthropic-compatible proxy endpoint.
 ///
@@ -80,7 +84,7 @@ pub async fn messages(
     // Public-guest requests (from the logged-out aura.ai surface) skip
     // billing entirely — cost is capped by the upstream rate limiter in
     // aura-os-server (3 turns/guest, 30/IP/day, global daily ceiling).
-    let is_public_guest = auth.user_id == "public-guest";
+    let is_public_guest = is_public_guest(&auth.user_id);
 
     if !is_public_guest {
         // Pre-check credits using the z-billing pricing table when possible.
@@ -832,7 +836,7 @@ fn spawn_post_request_tasks(
     let output_tokens = usage.output_tokens;
 
     // Debit z-billing (skip for public-guest — no billing account)
-    if user_id != "public-guest" {
+    if !is_public_guest(user_id) {
         let client = state.http_client.clone();
         let billing_url = state.z_billing_url.clone();
         let billing_key = state.z_billing_api_key.clone();
@@ -861,7 +865,13 @@ fn spawn_post_request_tasks(
         });
     }
 
-    // Record to aura-network
+    // The public guest is an intentional synthetic identity with no
+    // aura-network users-table row.
+    if is_public_guest(user_id) {
+        tracing::debug!(model = %model_owned, "Skipping persisted usage for public guest");
+        return;
+    }
+
     if let (Some(ref network_url), Some(ref network_token)) =
         (&state.aura_network_url, &state.aura_network_token)
     {
@@ -934,6 +944,14 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct TestClaims {
         id: String,
+    }
+
+    #[test]
+    fn public_guest_is_excluded_from_persisted_usage() {
+        assert!(super::is_public_guest(
+            aura_router_auth::PUBLIC_GUEST_USER_ID
+        ));
+        assert!(!super::is_public_guest("auth0|customer-725"));
     }
 
     #[test]
