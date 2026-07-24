@@ -626,6 +626,8 @@ fn set_anthropic_user_metadata(
 fn normalize_upstream_error(status: StatusCode, error_body: &[u8]) -> Response {
     let raw_message = extract_upstream_error_message(error_body)
         .unwrap_or_else(|| format!("Upstream provider returned HTTP {}", status.as_u16()));
+    let provider_account_error =
+        is_provider_account_error(&raw_message) || has_provider_account_error_code(error_body);
 
     // When the upstream provider ACCOUNT has a billing/account problem — out of
     // credits, suspended, or over its spend quota (a single shared key, never
@@ -634,12 +636,8 @@ fn normalize_upstream_error(status: StatusCode, error_body: &[u8]) -> Response {
     // "exceeded your current quota") both makes users think it's *their* fault
     // and can leak our account identifiers. Log it loudly so we notice and fix
     // the account, and replace only the user-facing text with a clear our-side
-    // message. Status and error type are passed through unchanged so the
-    // client's retry/terminal handling is identical to today's behaviour — a
-    // terminal 400/412 stays terminal rather than being reclassified as a
-    // retryable 5xx, so this does not trigger a retry storm against a condition
-    // only a human account fix resolves.
-    let message = if is_provider_account_error(&raw_message) {
+    // message.
+    let message = if provider_account_error {
         tracing::error!(
             upstream_status = %status,
             upstream_message = %raw_message,
@@ -654,16 +652,30 @@ fn normalize_upstream_error(status: StatusCode, error_body: &[u8]) -> Response {
         raw_message
     };
 
+    // OpenAI reports an exhausted account quota as 429, even though waiting
+    // cannot recover it. Legacy harnesses retry every 429, so normalize this
+    // one account-level case to 424 Failed Dependency. Genuine provider rate
+    // limits keep their original 429 and Retry-After semantics.
+    let response_status = if provider_account_error && status == StatusCode::TOO_MANY_REQUESTS {
+        StatusCode::FAILED_DEPENDENCY
+    } else {
+        status
+    };
+    let mut error = serde_json::json!({
+        "type": anthropic_error_type(response_status),
+        "message": message,
+    });
+    if provider_account_error {
+        error["code"] = serde_json::Value::String("provider_account_unavailable".to_string());
+    }
+
     (
-        status,
+        response_status,
         [(header::CONTENT_TYPE, "application/json".to_string())],
         Body::from(
             serde_json::json!({
                 "type": "error",
-                "error": {
-                    "type": anthropic_error_type(status),
-                    "message": message,
-                }
+                "error": error,
             })
             .to_string(),
         ),
@@ -695,6 +707,19 @@ fn is_provider_account_error(message: &str) -> bool {
         // OpenAI — account quota exhausted (NOT transient rate-limit).
         || m.contains("insufficient_quota")
         || m.contains("exceeded your current quota")
+}
+
+fn has_provider_account_error_code(error_body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(error_body)
+        .ok()
+        .is_some_and(|value| {
+            ["/error/type", "/error/code"].iter().any(|pointer| {
+                value
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|code| code.eq_ignore_ascii_case("insufficient_quota"))
+            })
+        })
 }
 
 fn anthropic_error_type(status: StatusCode) -> &'static str {
@@ -1264,9 +1289,7 @@ mod tests {
             br#"{"error":{"message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.","type":"invalid_request_error"}}"#,
         );
 
-        // Status and error type are passed through unchanged so the client's
-        // terminal/retry classification is identical to today (a 400 stays
-        // terminal — no retry storm against a human-top-up-only condition).
+        // Anthropic already returns a terminal 400 for account depletion.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1276,6 +1299,7 @@ mod tests {
 
         assert_eq!(body["type"], "error");
         assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "provider_account_unavailable");
         let message = body["error"]["message"].as_str().expect("message string");
         // Exact rendered text — also guards against stray whitespace from the
         // multi-line string continuations in the source.
@@ -1298,7 +1322,7 @@ mod tests {
             br#"{"error":{"message":"Account acme-7 is suspended, possibly due to reaching the monthly spending limit or failure to pay past invoices. Please go to https://fireworks.ai/account/billing for more information.","type":"api_error"}}"#,
         );
 
-        // Status passed through unchanged (412) so report-based triage still works.
+        // Fireworks already returns a terminal 412 for account suspension.
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
 
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1307,6 +1331,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
         let message = body["error"]["message"].as_str().expect("message string");
 
+        assert_eq!(body["error"]["code"], "provider_account_unavailable");
         assert_eq!(
             message,
             "AURA is temporarily unable to reach the model provider. This is an issue on our \
@@ -1327,7 +1352,9 @@ mod tests {
             br#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota"}}"#,
         );
 
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Unlike a genuine rate limit, account quota exhaustion cannot recover
+        // after a backoff. 424 prevents legacy harnesses retrying it as a 429.
+        assert_eq!(response.status(), StatusCode::FAILED_DEPENDENCY);
 
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1335,12 +1362,57 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
         let message = body["error"]["message"].as_str().expect("message string");
 
+        assert_eq!(body["error"]["type"], "api_error");
+        assert_eq!(body["error"]["code"], "provider_account_unavailable");
         assert_eq!(
             message,
             "AURA is temporarily unable to reach the model provider. This is an issue on our \
              side, not with your account or credits. Please try again shortly."
         );
         assert!(!message.to_ascii_lowercase().contains("quota"));
+    }
+
+    #[tokio::test]
+    async fn recognizes_structured_account_quota_when_provider_copy_changes() {
+        let response = super::normalize_upstream_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"message":"Capacity unavailable for this request.","type":"insufficient_quota"}}"#,
+        );
+
+        assert_eq!(response.status(), StatusCode::FAILED_DEPENDENCY);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response bytes");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+
+        assert_eq!(body["error"]["code"], "provider_account_unavailable");
+        assert!(!body["error"]["message"]
+            .as_str()
+            .expect("message string")
+            .contains("Capacity unavailable"));
+    }
+
+    #[tokio::test]
+    async fn preserves_genuine_provider_rate_limit_as_retryable_429() {
+        let response = super::normalize_upstream_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"message":"Rate limit reached for gpt-5.5 in organization org-xxx. Please try again in 1s.","type":"rate_limit_error"}}"#,
+        );
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response bytes");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert!(body["error"].get("code").is_none());
+        assert!(body["error"]["message"]
+            .as_str()
+            .expect("message string")
+            .contains("Please try again in 1s"));
     }
 
     #[tokio::test]
