@@ -1,5 +1,51 @@
 //! aura-network usage recording client.
 
+fn optional_uuid(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(|candidate| uuid::Uuid::parse_str(candidate).ok())
+        .map(|id| id.to_string())
+}
+
+fn usage_payload(
+    user_id: &str,
+    org_id: Option<&str>,
+    project_id: Option<&str>,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    duration_ms: u64,
+) -> serde_json::Value {
+    // aura-network deserializes userId/orgId/projectId as UUIDs before its
+    // handler can resolve zeroUserId. Auth0 subjects and Home/local project
+    // labels are valid router context but are not UUIDs, so forwarding them
+    // verbatim produces a 422 even though the provider request succeeded.
+    //
+    // A nil userId is only a schema-safe placeholder. aura-network replaces
+    // it from zeroUserId before inserting usage. Optional attribution fields
+    // are omitted when they are not network UUIDs.
+    let network_user_id = uuid::Uuid::parse_str(user_id)
+        .unwrap_or_else(|_| uuid::Uuid::nil())
+        .to_string();
+    let input_tokens = input_tokens.min(i64::MAX as u64) as i64;
+    let output_tokens = output_tokens.min(i64::MAX as u64) as i64;
+    let duration_ms = duration_ms.min(i64::MAX as u64) as i64;
+    let cost_usd = if cost_usd.is_finite() { cost_usd } else { 0.0 };
+
+    serde_json::json!({
+        "orgId": optional_uuid(org_id),
+        "userId": network_user_id,
+        "zeroUserId": user_id,
+        "agentId": null,
+        "projectId": optional_uuid(project_id),
+        "model": model,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "estimatedCostUsd": cost_usd,
+        "durationMs": duration_ms
+    })
+}
+
 /// Record token usage to aura-network (fire-and-forget).
 ///
 /// Calls POST /internal/usage with X-Internal-Token. Any of `org_id`,
@@ -35,18 +81,16 @@ pub async fn record_usage(
     let result = client
         .post(&url)
         .header("x-internal-token", token)
-        .json(&serde_json::json!({
-            "orgId": org_id,
-            "userId": user_id,
-            "zeroUserId": user_id,
-            "agentId": serde_json::Value::Null,
-            "projectId": project_id,
-            "model": model,
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-            "estimatedCostUsd": cost_usd,
-            "durationMs": duration_ms
-        }))
+        .json(&usage_payload(
+            user_id,
+            org_id,
+            project_id,
+            model,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            duration_ms,
+        ))
         .send()
         .await;
 
@@ -55,13 +99,76 @@ pub async fn record_usage(
             tracing::debug!(user_id = %user_id, model = %model, "Usage recorded to aura-network");
         }
         Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+            let body_preview: String = body.chars().take(1_000).collect();
             tracing::warn!(
-                status = %resp.status(),
+                status = %status,
+                user_id = %user_id,
+                model = %model,
+                body = %body_preview,
                 "Failed to record usage to aura-network"
             );
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to reach aura-network for usage recording");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usage_payload;
+
+    #[test]
+    fn usage_payload_preserves_network_uuids() {
+        let user_id = uuid::Uuid::new_v4();
+        let org_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+
+        let payload = usage_payload(
+            &user_id.to_string(),
+            Some(&org_id.to_string()),
+            Some(&project_id.to_string()),
+            "aura-claude-haiku-4-5",
+            12,
+            7,
+            0.01,
+            250,
+        );
+
+        assert_eq!(payload["userId"], user_id.to_string());
+        assert_eq!(payload["zeroUserId"], user_id.to_string());
+        assert_eq!(payload["orgId"], org_id.to_string());
+        assert_eq!(payload["projectId"], project_id.to_string());
+        assert_eq!(payload["inputTokens"], 12);
+        assert_eq!(payload["outputTokens"], 7);
+        assert_eq!(payload["durationMs"], 250);
+    }
+
+    #[test]
+    fn usage_payload_sanitizes_non_uuid_router_context() {
+        let payload = usage_payload(
+            "auth0|customer-725",
+            Some("my-team"),
+            Some("home"),
+            "aura-grok-4-5",
+            u64::MAX,
+            u64::MAX,
+            f64::NAN,
+            u64::MAX,
+        );
+
+        assert_eq!(payload["userId"], uuid::Uuid::nil().to_string());
+        assert_eq!(payload["zeroUserId"], "auth0|customer-725");
+        assert!(payload["orgId"].is_null());
+        assert!(payload["projectId"].is_null());
+        assert_eq!(payload["inputTokens"], i64::MAX);
+        assert_eq!(payload["outputTokens"], i64::MAX);
+        assert_eq!(payload["estimatedCostUsd"], 0.0);
+        assert_eq!(payload["durationMs"], i64::MAX);
     }
 }
