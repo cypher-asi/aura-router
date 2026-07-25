@@ -29,12 +29,18 @@ pub fn request_to_upstream(
         Provider::Anthropic => {
             let mut next = request.clone();
             next["model"] = Value::String(upstream_model.to_string());
-            // The provider-neutral `reasoning_effort` hint is for
-            // OpenAI-family translation only. Anthropic encodes effort
-            // in `output_config`/`thinking` and would 400 on the unknown
-            // top-level key, so strip it before forwarding.
+            // Provider-neutral reasoning/cache hints are translated only
+            // for OpenAI-family providers. Anthropic uses native
+            // `output_config`/`thinking` and content-block `cache_control`,
+            // so forwarding these unknown top-level keys would 400.
             if let Some(obj) = next.as_object_mut() {
-                obj.remove("reasoning_effort");
+                for key in [
+                    "reasoning_effort",
+                    "prompt_cache_key",
+                    "prompt_cache_retention",
+                ] {
+                    obj.remove(key);
+                }
             }
             Ok(next)
         }
@@ -1390,25 +1396,35 @@ mod tests {
     }
 
     #[test]
-    fn strips_reasoning_effort_for_anthropic_upstream() {
+    fn strips_provider_neutral_controls_for_anthropic_upstream() {
         let request = json!({
-            "model": "aura-claude-sonnet-4-6",
+            "model": "aura-claude-opus-5",
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
             "max_tokens": 1024,
             "output_config": {"effort": "high"},
-            "reasoning_effort": "max"
+            "thinking": {"type": "adaptive"},
+            "reasoning_effort": "max",
+            "prompt_cache_key": "agent:abc-123",
+            "prompt_cache_retention": "24h"
         });
-        let upstream = request_to_upstream(Provider::Anthropic, "claude-sonnet-4-6", &request)
+        let upstream = request_to_upstream(Provider::Anthropic, "claude-opus-5", &request)
             .expect("translation");
-        assert!(
-            upstream.get("reasoning_effort").is_none(),
-            "Anthropic must not receive the neutral hint: {upstream}"
-        );
-        // The Anthropic-native effort control is left untouched.
+        for key in [
+            "reasoning_effort",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+        ] {
+            assert!(
+                upstream.get(key).is_none(),
+                "Anthropic must not receive neutral key {key}: {upstream}"
+            );
+        }
+        // Anthropic-native reasoning controls are left untouched.
         assert_eq!(
             upstream["output_config"]["effort"],
             Value::String("high".to_string())
         );
+        assert_eq!(upstream["thinking"]["type"], "adaptive");
     }
 
     #[test]
