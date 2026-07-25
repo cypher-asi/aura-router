@@ -98,6 +98,11 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             upstream_model: "claude-fable-5",
             provider: Provider::Anthropic,
         }),
+        "aura-claude-opus-5" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "claude-opus-5",
+            provider: Provider::Anthropic,
+        }),
         "aura-claude-opus-4-8" => Some(ResolvedModel {
             requested_model: model,
             upstream_model: "claude-opus-4-8",
@@ -516,6 +521,7 @@ pub fn max_context_tokens(model: &str) -> u64 {
     match resolved_model {
         // Anthropic
         m if m.starts_with("claude-fable-5") => 1_000_000,
+        m if m.starts_with("claude-opus-5") => 1_000_000,
         m if m.starts_with("claude-opus-4") => 1_000_000,
         m if m.starts_with("claude-sonnet-4") => 1_000_000,
         m if m.starts_with("claude-haiku-4") => 200_000,
@@ -746,6 +752,12 @@ mod tests {
         assert_eq!(resolved.provider, Provider::Anthropic);
         assert_eq!(super::max_context_tokens("aura-claude-fable-5"), 1_000_000);
 
+        let resolved = resolve_model("aura-claude-opus-5").expect("model alias should resolve");
+        assert_eq!(resolved.requested_model, "aura-claude-opus-5");
+        assert_eq!(resolved.upstream_model, "claude-opus-5");
+        assert_eq!(resolved.provider, Provider::Anthropic);
+        assert_eq!(super::max_context_tokens("aura-claude-opus-5"), 1_000_000);
+
         let resolved = resolve_model("aura-gpt-5-5").expect("model alias should resolve");
         assert_eq!(resolved.requested_model, "aura-gpt-5-5");
         assert_eq!(resolved.upstream_model, "gpt-5.5");
@@ -782,7 +794,7 @@ mod tests {
         // Fireworks-hosted models still resolve to their real maker, even
         // though their host provider is Fireworks.
         let cases = [
-            ("aura-claude-opus-4-8", "Anthropic"),
+            ("aura-claude-opus-5", "Anthropic"),
             ("aura-gpt-5-5", "OpenAI"),
             ("aura-gpt-5-6-sol", "OpenAI"),
             ("aura-gpt-5-6-terra", "OpenAI"),

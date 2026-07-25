@@ -40,7 +40,7 @@ const ANTHROPIC_WEB_SEARCH_CENTS_PER_REQUEST: f64 = 1.0;
 const OPENAI_LONG_CONTEXT_THRESHOLD: u64 = 272_000;
 
 /// Versioned source identifier emitted with provider-cost estimates.
-pub const PRICING_SOURCE: &str = "aura-router-static-2026-07-22";
+pub const PRICING_SOURCE: &str = "aura-router-static-2026-07-25";
 
 /// Detailed provider usage used for cost estimation and billing overrides.
 #[derive(Debug, Clone, Default)]
@@ -261,6 +261,7 @@ fn anthropic_fast_mode_multiplier(provider: &str, model: &str, speed: Option<&st
     }
     let model = model.strip_prefix("anthropic/").unwrap_or(model);
     match model {
+        "claude-opus-5" | "aura-claude-opus-5" => 2.0,
         "claude-opus-4-8" | "aura-claude-opus-4-8" => 2.0,
         "claude-opus-4-7" | "aura-claude-opus-4-7" => 6.0,
         _ => 1.0,
@@ -407,9 +408,11 @@ fn anthropic_rates_on(model: &str, date: chrono::NaiveDate) -> Option<CacheAware
             output_cents_per_million: 5000.0,
             input_tokens_is_new_only: true,
         }),
-        "claude-opus-4-6"
+        "claude-opus-5"
+        | "claude-opus-4-6"
         | "claude-opus-4-7"
         | "claude-opus-4-8"
+        | "aura-claude-opus-5"
         | "aura-claude-opus-4-6"
         | "aura-claude-opus-4-7"
         | "aura-claude-opus-4-8" => Some(CacheAwareRates {
@@ -1018,6 +1021,57 @@ mod tests {
             cache_aware_cost_cents("anthropic", "claude-opus-4-7", 1, 595, 0, 50_000),
             Some(5)
         );
+    }
+
+    #[test]
+    fn anthropic_opus_5_uses_ttl_specific_cache_rates() {
+        let usage = UsageCostInput {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 2_000_000,
+            cache_creation_5m_input_tokens: 1_000_000,
+            cache_creation_1h_input_tokens: 1_000_000,
+            cache_read_input_tokens: 1_000_000,
+            ..UsageCostInput::default()
+        };
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 25).unwrap();
+
+        for model in ["claude-opus-5", "aura-claude-opus-5"] {
+            let estimate =
+                estimate_usage_cost_on("anthropic", model, &usage, date).expect("Opus 5 pricing");
+            assert_eq!(
+                estimate.provider_cost_microusd, 46_750_000,
+                "provider cost mismatch for {model}"
+            );
+            assert_eq!(
+                estimate.billed_cost_cents, 5_610,
+                "marked-up cost mismatch for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_opus_5_fast_mode_doubles_all_token_rates() {
+        let usage = UsageCostInput {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 2_000_000,
+            cache_creation_5m_input_tokens: 1_000_000,
+            cache_creation_1h_input_tokens: 1_000_000,
+            cache_read_input_tokens: 1_000_000,
+            speed: Some("fast".to_string()),
+            ..UsageCostInput::default()
+        };
+        let estimate = estimate_usage_cost_on(
+            "anthropic",
+            "aura-claude-opus-5",
+            &usage,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 25).unwrap(),
+        )
+        .expect("Opus 5 fast-mode pricing");
+
+        assert_eq!(estimate.provider_cost_microusd, 93_500_000);
+        assert_eq!(estimate.billed_cost_cents, 11_220);
     }
 
     #[test]
