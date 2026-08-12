@@ -38,9 +38,11 @@ const USD_TICKS_PER_CENT: f64 = 100_000_000.0;
 const MICRO_USD_PER_CENT: f64 = 10_000.0;
 const ANTHROPIC_WEB_SEARCH_CENTS_PER_REQUEST: f64 = 1.0;
 const OPENAI_LONG_CONTEXT_THRESHOLD: u64 = 272_000;
+const XAI_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
+const GOOGLE_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
 
 /// Versioned source identifier emitted with provider-cost estimates.
-pub const PRICING_SOURCE: &str = "aura-router-static-2026-07-25";
+pub const PRICING_SOURCE: &str = "aura-router-static-2026-08-12";
 
 /// Detailed provider usage used for cost estimation and billing overrides.
 #[derive(Debug, Clone, Default)]
@@ -180,17 +182,12 @@ fn estimate_usage_cost_on(
             .input_tokens
             .saturating_sub(cache_creation_tokens.saturating_add(usage.cache_read_input_tokens))
     };
-    let normalized_model = model.strip_prefix("openai/").unwrap_or(model);
-    let is_long_context_model = matches!(
-        normalized_model,
-        "aura-gpt-5-4" | "gpt-5.4" | "aura-gpt-5-5" | "gpt-5.5"
-    ) || normalized_model.starts_with("aura-gpt-5-6-")
-        || normalized_model.starts_with("gpt-5.6");
-    let is_long_context_openai = provider == "openai"
-        && usage.input_tokens > OPENAI_LONG_CONTEXT_THRESHOLD
-        && is_long_context_model;
-    let input_multiplier = if is_long_context_openai { 2.0 } else { 1.0 };
-    let output_multiplier = if is_long_context_openai { 1.5 } else { 1.0 };
+    let (context_input_multiplier, context_output_multiplier) =
+        long_context_multipliers(provider, model, usage.input_tokens);
+    let service_tier_multiplier =
+        openai_service_tier_multiplier(provider, model, usage.service_tier.as_deref());
+    let input_multiplier = context_input_multiplier * service_tier_multiplier;
+    let output_multiplier = context_output_multiplier * service_tier_multiplier;
     let speed_multiplier = anthropic_fast_mode_multiplier(provider, model, usage.speed.as_deref());
 
     let geo_multiplier = if provider == "anthropic"
@@ -263,8 +260,72 @@ fn anthropic_fast_mode_multiplier(provider: &str, model: &str, speed: Option<&st
     match model {
         "claude-opus-5" | "aura-claude-opus-5" => 2.0,
         "claude-opus-4-8" | "aura-claude-opus-4-8" => 2.0,
-        "claude-opus-4-7" | "aura-claude-opus-4-7" => 6.0,
         _ => 1.0,
+    }
+}
+
+fn long_context_multipliers(provider: &str, model: &str, input_tokens: u64) -> (f64, f64) {
+    let model = model
+        .strip_prefix("openai/")
+        .or_else(|| model.strip_prefix("xai/"))
+        .or_else(|| model.strip_prefix("grok/"))
+        .or_else(|| model.strip_prefix("google/"))
+        .unwrap_or(model);
+    let openai_long = provider == "openai"
+        && input_tokens > OPENAI_LONG_CONTEXT_THRESHOLD
+        && (matches!(
+            model,
+            "aura-gpt-5-4" | "gpt-5.4" | "aura-gpt-5-5" | "gpt-5.5"
+        ) || model.starts_with("aura-gpt-5-6-")
+            || model.starts_with("gpt-5.6"));
+    let xai_long = provider == "xai"
+        && input_tokens >= XAI_LONG_CONTEXT_THRESHOLD
+        && (matches!(
+            model,
+            "aura-grok-4-5" | "grok-4.5" | "aura-grok-4-3" | "grok-4.3"
+        ) || matches!(
+            model,
+            "aura-grok-build-0-1"
+                | "grok-build-0.1"
+                | "grok-code-fast"
+                | "grok-code-fast-1"
+                | "grok-code-fast-1-0825"
+        ));
+    let google_long = provider == "google"
+        && input_tokens > GOOGLE_LONG_CONTEXT_THRESHOLD
+        && matches!(
+            model,
+            "aura-gemini-3-1-pro"
+                | "gemini-3.1-pro-preview"
+                | "aura-gemini-2-5-pro"
+                | "gemini-2.5-pro"
+        );
+    if xai_long {
+        (2.0, 2.0)
+    } else if openai_long || google_long {
+        (2.0, 1.5)
+    } else {
+        (1.0, 1.0)
+    }
+}
+
+fn openai_service_tier_multiplier(provider: &str, model: &str, service_tier: Option<&str>) -> f64 {
+    if provider != "openai" || !matches!(service_tier, Some("priority") | Some("fast")) {
+        return 1.0;
+    }
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+    if matches!(model, "aura-gpt-5-5" | "gpt-5.5") {
+        2.5
+    } else if model.starts_with("gpt-5.6")
+        || model.starts_with("aura-gpt-5-6-")
+        || matches!(
+            model,
+            "aura-gpt-5-4" | "gpt-5.4" | "aura-gpt-5-4-mini" | "gpt-5.4-mini"
+        )
+    {
+        2.0
+    } else {
+        1.0
     }
 }
 
@@ -306,7 +367,7 @@ fn xai_rates(model: &str) -> Option<CacheAwareRates> {
         "aura-grok-4-5" | "grok-4.5" => Some(CacheAwareRates {
             new_input_cents_per_million: 200.0,
             cache_write_input_cents_per_million: 200.0,
-            cache_read_input_cents_per_million: 50.0,
+            cache_read_input_cents_per_million: 30.0,
             output_cents_per_million: 600.0,
             input_tokens_is_new_only: false,
         }),
@@ -394,7 +455,7 @@ fn google_rates(model: &str) -> Option<CacheAwareRates> {
     }
 }
 
-fn anthropic_rates_on(model: &str, date: chrono::NaiveDate) -> Option<CacheAwareRates> {
+fn anthropic_rates_on(model: &str, _date: chrono::NaiveDate) -> Option<CacheAwareRates> {
     let model = model.strip_prefix("anthropic/").unwrap_or(model);
 
     // Anthropic returns `input_tokens` as the new (uncached) portion only;
@@ -429,19 +490,13 @@ fn anthropic_rates_on(model: &str, date: chrono::NaiveDate) -> Option<CacheAware
             output_cents_per_million: 1500.0,
             input_tokens_is_new_only: true,
         }),
-        "claude-sonnet-5" | "aura-claude-sonnet-5" => {
-            let promotional =
-                date <= chrono::NaiveDate::from_ymd_opt(2026, 8, 31).expect("valid pricing date");
-            let base_input = if promotional { 200.0 } else { 300.0 };
-            let output = if promotional { 1000.0 } else { 1500.0 };
-            Some(CacheAwareRates {
-                new_input_cents_per_million: base_input,
-                cache_write_input_cents_per_million: base_input * 1.25,
-                cache_read_input_cents_per_million: base_input * 0.10,
-                output_cents_per_million: output,
-                input_tokens_is_new_only: true,
-            })
-        }
+        "claude-sonnet-5" | "aura-claude-sonnet-5" => Some(CacheAwareRates {
+            new_input_cents_per_million: 200.0,
+            cache_write_input_cents_per_million: 250.0,
+            cache_read_input_cents_per_million: 20.0,
+            output_cents_per_million: 1000.0,
+            input_tokens_is_new_only: true,
+        }),
         "claude-haiku-4-5" | "claude-haiku-4-5-20251001" | "aura-claude-haiku-4-5" => {
             Some(CacheAwareRates {
                 new_input_cents_per_million: 100.0,
@@ -459,22 +514,20 @@ fn deepseek_rates(model: &str) -> Option<CacheAwareRates> {
     let model = model.strip_prefix("deepseek/").unwrap_or(model);
 
     match model {
-        "aura-deepseek-v4-pro" | "deepseek-v4-pro" => Some(CacheAwareRates {
-            new_input_cents_per_million: 174.0,
-            cache_write_input_cents_per_million: 174.0,
-            cache_read_input_cents_per_million: 14.5,
-            output_cents_per_million: 348.0,
+        "deepseek-v4-pro" => Some(CacheAwareRates {
+            new_input_cents_per_million: 43.5,
+            cache_write_input_cents_per_million: 43.5,
+            cache_read_input_cents_per_million: 0.3625,
+            output_cents_per_million: 87.0,
             input_tokens_is_new_only: false,
         }),
-        "aura-deepseek-v4-flash" | "deepseek-v4-flash" | "deepseek-chat" | "deepseek-reasoner" => {
-            Some(CacheAwareRates {
-                new_input_cents_per_million: 14.0,
-                cache_write_input_cents_per_million: 14.0,
-                cache_read_input_cents_per_million: 2.8,
-                output_cents_per_million: 28.0,
-                input_tokens_is_new_only: false,
-            })
-        }
+        "deepseek-v4-flash" | "deepseek-chat" | "deepseek-reasoner" => Some(CacheAwareRates {
+            new_input_cents_per_million: 14.0,
+            cache_write_input_cents_per_million: 14.0,
+            cache_read_input_cents_per_million: 0.28,
+            output_cents_per_million: 28.0,
+            input_tokens_is_new_only: false,
+        }),
         _ => None,
     }
 }
@@ -491,17 +544,17 @@ fn openai_rates(model: &str) -> Option<CacheAwareRates> {
             input_tokens_is_new_only: false,
         }),
         "aura-gpt-5-6-terra" | "gpt-5.6-terra" => Some(CacheAwareRates {
-            new_input_cents_per_million: 250.0,
-            cache_write_input_cents_per_million: 312.5,
-            cache_read_input_cents_per_million: 25.0,
-            output_cents_per_million: 1500.0,
+            new_input_cents_per_million: 200.0,
+            cache_write_input_cents_per_million: 250.0,
+            cache_read_input_cents_per_million: 20.0,
+            output_cents_per_million: 1200.0,
             input_tokens_is_new_only: false,
         }),
         "aura-gpt-5-6-luna" | "gpt-5.6-luna" => Some(CacheAwareRates {
-            new_input_cents_per_million: 100.0,
-            cache_write_input_cents_per_million: 125.0,
-            cache_read_input_cents_per_million: 10.0,
-            output_cents_per_million: 600.0,
+            new_input_cents_per_million: 20.0,
+            cache_write_input_cents_per_million: 25.0,
+            cache_read_input_cents_per_million: 2.0,
+            output_cents_per_million: 120.0,
             input_tokens_is_new_only: false,
         }),
         "aura-gpt-5-5" | "gpt-5.5" => Some(CacheAwareRates {
@@ -540,13 +593,13 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
     let model = model.strip_prefix("fireworks/").unwrap_or(model);
 
     // Fireworks normalizes through the OpenAI-shaped path, so `input_tokens`
-    // is the total prompt size. Fireworks discounts cache reads at 50% off
-    // base input and does not charge a premium for cache writes.
+    // is the total prompt size. Cached-input discounts are model-specific;
+    // cache writes use the base input rate.
     match model {
         "aura-kimi-k2-5" | "accounts/fireworks/models/kimi-k2p5" => Some(CacheAwareRates {
             new_input_cents_per_million: 60.0,
             cache_write_input_cents_per_million: 60.0,
-            cache_read_input_cents_per_million: 30.0,
+            cache_read_input_cents_per_million: 10.0,
             output_cents_per_million: 300.0,
             input_tokens_is_new_only: false,
         }),
@@ -561,7 +614,7 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
         "aura-kimi-k2-6" | "accounts/fireworks/models/kimi-k2p6" => Some(CacheAwareRates {
             new_input_cents_per_million: 95.0,
             cache_write_input_cents_per_million: 95.0,
-            cache_read_input_cents_per_million: 47.5,
+            cache_read_input_cents_per_million: 16.0,
             output_cents_per_million: 400.0,
             input_tokens_is_new_only: false,
         }),
@@ -595,12 +648,12 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
         "aura-oss-120b" | "accounts/fireworks/models/gpt-oss-120b" => Some(CacheAwareRates {
             new_input_cents_per_million: 15.0,
             cache_write_input_cents_per_million: 15.0,
-            cache_read_input_cents_per_million: 7.5,
+            cache_read_input_cents_per_million: 1.5,
             output_cents_per_million: 60.0,
             input_tokens_is_new_only: false,
         }),
         // DeepSeek V4 models are served via Fireworks, so they bill under the
-        // "fireworks" provider. Base rates match DeepSeek's published pricing;
+        // "fireworks" provider. These are Fireworks' published hosted rates;
         // the standard markup is applied by `cache_aware_cost_cents`.
         "aura-deepseek-v4-pro" | "accounts/fireworks/models/deepseek-v4-pro" => {
             Some(CacheAwareRates {
@@ -621,10 +674,10 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
             })
         }
         "aura-minimax-m3" | "accounts/fireworks/models/minimax-m3" => Some(CacheAwareRates {
-            new_input_cents_per_million: 40.0,
-            cache_write_input_cents_per_million: 40.0,
-            cache_read_input_cents_per_million: 8.0,
-            output_cents_per_million: 160.0,
+            new_input_cents_per_million: 30.0,
+            cache_write_input_cents_per_million: 30.0,
+            cache_read_input_cents_per_million: 6.0,
+            output_cents_per_million: 120.0,
             input_tokens_is_new_only: false,
         }),
         "aura-minimax-m2-7" | "accounts/fireworks/models/minimax-m2p7" => Some(CacheAwareRates {
@@ -644,7 +697,7 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
         "aura-glm-5-2" | "accounts/fireworks/models/glm-5p2" => Some(CacheAwareRates {
             new_input_cents_per_million: 140.0,
             cache_write_input_cents_per_million: 140.0,
-            cache_read_input_cents_per_million: 26.0,
+            cache_read_input_cents_per_million: 14.0,
             output_cents_per_million: 440.0,
             input_tokens_is_new_only: false,
         }),
@@ -816,8 +869,9 @@ pub async fn report_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_aware_cost_cents, estimate_usage_cost_on, marked_up_cost_cents_from_usd_ticks,
-        provider_cost_microusd_from_usd_ticks, UsageCostInput,
+        cache_aware_cost_cents, estimate_usage_cost_on, fireworks_rates, long_context_multipliers,
+        marked_up_cost_cents_from_usd_ticks, openai_rates, openai_service_tier_multiplier,
+        provider_cost_microusd_from_usd_ticks, xai_rates, UsageCostInput,
     };
 
     #[test]
@@ -825,13 +879,13 @@ mod tests {
         assert_eq!(
             cache_aware_cost_cents(
                 "deepseek",
-                "aura-deepseek-v4-pro",
+                "deepseek-v4-pro",
                 1_000_000,
                 500_000,
                 0,
                 1_000_000,
             ),
-            Some(226)
+            Some(53)
         );
         assert_eq!(
             cache_aware_cost_cents(
@@ -842,21 +896,14 @@ mod tests {
                 0,
                 1_000_000,
             ),
-            Some(20)
+            Some(17)
         );
     }
 
     #[test]
     fn deepseek_cost_override_is_absent_without_cache_buckets() {
         assert_eq!(
-            cache_aware_cost_cents(
-                "deepseek",
-                "aura-deepseek-v4-flash",
-                1_000_000,
-                500_000,
-                0,
-                0,
-            ),
+            cache_aware_cost_cents("deepseek", "deepseek-v4-flash", 1_000_000, 500_000, 0, 0,),
             None
         );
         // Unknown provider with cache buckets still returns None.
@@ -897,7 +944,7 @@ mod tests {
         // Below the threshold, Luna cache writes remain 1.25x input.
         assert_eq!(
             cache_aware_cost_cents("openai", "gpt-5.6-luna", 200_000, 100_000, 100_000, 50_000,),
-            Some(94)
+            Some(19)
         );
     }
 
@@ -927,17 +974,16 @@ mod tests {
 
     #[test]
     fn xai_grok_cache_aware_cost_discounts_cached_tokens() {
-        // grok-4.5: new 0, cache_read 1M x 50, output 500k x 600.
-        // (50_000_000 + 300_000_000) x 1.2 / 1M = 420
+        // Grok's >=200K tier doubles every token rate.
         assert_eq!(
             cache_aware_cost_cents("xai", "aura-grok-4-5", 1_000_000, 500_000, 0, 1_000_000),
-            Some(420)
+            Some(792)
         );
         // grok-4.3: new 0, cache_read 1M x 20, output 500k x 250.
         // (20_000_000 + 125_000_000) x 1.2 / 1M = 174
         assert_eq!(
             cache_aware_cost_cents("xai", "aura-grok-4-3", 1_000_000, 500_000, 0, 1_000_000),
-            Some(174)
+            Some(348)
         );
         // grok-build-0.1: new 0, cache_read 1M x 20, output 500k x 200.
         // (20_000_000 + 100_000_000) x 1.2 / 1M = 144
@@ -950,7 +996,7 @@ mod tests {
                 0,
                 1_000_000
             ),
-            Some(144)
+            Some(288)
         );
     }
 
@@ -967,8 +1013,7 @@ mod tests {
 
     #[test]
     fn google_gemini_cache_aware_cost_discounts_cached_tokens() {
-        // gemini-2.5-pro: new 0, cache_read 1M × 12.5, output 500k × 1000.
-        // (12_500_000 + 500_000_000) × 1.2 / 1M = 615
+        // Gemini 2.5 Pro's >200K tier doubles input and makes output 1.5x.
         assert_eq!(
             cache_aware_cost_cents(
                 "google",
@@ -978,7 +1023,7 @@ mod tests {
                 0,
                 1_000_000
             ),
-            Some(615)
+            Some(930)
         );
         // Raw upstream name resolves to the same rate table.
         assert_eq!(
@@ -1116,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn sonnet_5_introductory_pricing_switches_after_august() {
+    fn sonnet_5_launch_pricing_remains_permanent() {
         let usage = UsageCostInput {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
@@ -1138,7 +1183,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(promotional.provider_cost_microusd, 12_000_000);
-        assert_eq!(standard.provider_cost_microusd, 18_000_000);
+        assert_eq!(standard.provider_cost_microusd, 12_000_000);
     }
 
     #[test]
@@ -1154,7 +1199,7 @@ mod tests {
         let opus_47 = estimate_usage_cost_on("anthropic", "claude-opus-4-7", &usage, date).unwrap();
 
         assert_eq!(opus_48.provider_cost_microusd, 60_000_000);
-        assert_eq!(opus_47.provider_cost_microusd, 180_000_000);
+        assert_eq!(opus_47.provider_cost_microusd, 30_000_000);
     }
 
     #[test]
@@ -1219,12 +1264,12 @@ mod tests {
     #[test]
     fn fireworks_kimi_discounts_cache_reads() {
         // new: (100_000 − 80_000) × 60 = 1_200_000
-        // read: 80_000 × 30 = 2_400_000
+        // read: 80_000 × 10 = 800_000
         // output: 500 × 300 = 150_000
-        // total: 3_750_000 / 1M = 3.75 × 1.20 = 4.5 → 5
+        // total: 2_150_000 / 1M = 2.15 × 1.20 = 2.58 → 3
         assert_eq!(
             cache_aware_cost_cents("fireworks", "aura-kimi-k2-5", 100_000, 500, 0, 80_000),
-            Some(5)
+            Some(3)
         );
     }
 
@@ -1283,18 +1328,29 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_via_fireworks_matches_direct_deepseek_cost() {
-        // DeepSeek now bills under the "fireworks" provider; the cost must be
-        // identical to the prior "deepseek"-provider result so the routing
-        // change does not alter what users pay.
-        for model in ["aura-deepseek-v4-pro", "aura-deepseek-v4-flash"] {
-            let via_fireworks =
-                cache_aware_cost_cents("fireworks", model, 1_000_000, 500_000, 0, 1_000_000);
-            let via_deepseek =
-                cache_aware_cost_cents("deepseek", model, 1_000_000, 500_000, 0, 1_000_000);
-            assert_eq!(via_fireworks, via_deepseek, "cost parity for {model}");
-            assert!(via_fireworks.is_some(), "rate present for {model}");
-        }
+    fn deepseek_direct_and_fireworks_hosted_rates_are_distinct() {
+        assert_eq!(
+            cache_aware_cost_cents(
+                "deepseek",
+                "deepseek-v4-pro",
+                1_000_000,
+                500_000,
+                0,
+                1_000_000,
+            ),
+            Some(53)
+        );
+        assert_eq!(
+            cache_aware_cost_cents(
+                "fireworks",
+                "aura-deepseek-v4-pro",
+                1_000_000,
+                500_000,
+                0,
+                1_000_000,
+            ),
+            Some(226)
+        );
 
         // The Fireworks upstream id resolves to the same rate as the aura id.
         assert_eq!(
@@ -1362,5 +1418,64 @@ mod tests {
             assert_eq!(via_alias, via_upstream, "rate parity for {alias}");
             assert!(via_alias.is_some(), "rate present for {alias}");
         }
+    }
+
+    #[test]
+    fn current_rate_card_matches_provider_publications() {
+        let terra = openai_rates("gpt-5.6-terra").unwrap();
+        assert_eq!(terra.new_input_cents_per_million, 200.0);
+        assert_eq!(terra.cache_write_input_cents_per_million, 250.0);
+        assert_eq!(terra.output_cents_per_million, 1200.0);
+
+        let luna = openai_rates("gpt-5.6-luna").unwrap();
+        assert_eq!(luna.new_input_cents_per_million, 20.0);
+        assert_eq!(luna.output_cents_per_million, 120.0);
+
+        assert_eq!(
+            xai_rates("grok-4.5")
+                .unwrap()
+                .cache_read_input_cents_per_million,
+            30.0
+        );
+        for (model, input, cache_read, output) in [
+            ("accounts/fireworks/models/gpt-oss-120b", 15.0, 1.5, 60.0),
+            ("accounts/fireworks/models/minimax-m3", 30.0, 6.0, 120.0),
+            ("accounts/fireworks/models/glm-5p2", 140.0, 14.0, 440.0),
+        ] {
+            let rates = fireworks_rates(model).unwrap();
+            assert_eq!(
+                rates.new_input_cents_per_million, input,
+                "input for {model}"
+            );
+            assert_eq!(
+                rates.cache_read_input_cents_per_million, cache_read,
+                "cache read for {model}"
+            );
+            assert_eq!(rates.output_cents_per_million, output, "output for {model}");
+        }
+    }
+
+    #[test]
+    fn long_context_and_priority_tiers_apply_at_published_boundaries() {
+        assert_eq!(
+            long_context_multipliers("xai", "grok-4.5", 199_999),
+            (1.0, 1.0)
+        );
+        assert_eq!(
+            long_context_multipliers("xai", "grok-4.5", 200_000),
+            (2.0, 2.0)
+        );
+        assert_eq!(
+            long_context_multipliers("google", "gemini-2.5-pro", 200_001),
+            (2.0, 1.5)
+        );
+        assert_eq!(
+            openai_service_tier_multiplier("openai", "gpt-5.5", Some("priority")),
+            2.5
+        );
+        assert_eq!(
+            openai_service_tier_multiplier("openai", "gpt-5.6-terra", Some("fast")),
+            2.0
+        );
     }
 }

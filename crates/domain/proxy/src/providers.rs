@@ -523,6 +523,7 @@ pub fn max_context_tokens(model: &str) -> u64 {
         m if m.starts_with("claude-fable-5") => 1_000_000,
         m if m.starts_with("claude-opus-5") => 1_000_000,
         m if m.starts_with("claude-opus-4") => 1_000_000,
+        m if m.starts_with("claude-sonnet-5") => 1_000_000,
         m if m.starts_with("claude-sonnet-4") => 1_000_000,
         m if m.starts_with("claude-haiku-4") => 200_000,
         m if m.starts_with("claude-3-5") => 200_000,
@@ -551,15 +552,18 @@ pub fn max_context_tokens(model: &str) -> u64 {
         // Fireworks OSS
         "accounts/fireworks/models/kimi-k2p5" => 262_144,
         "accounts/fireworks/models/kimi-k2p6" => 262_144,
+        "accounts/fireworks/models/kimi-k2p7-code" => 262_144,
         "accounts/fireworks/models/gpt-oss-120b" => 131_072,
         "accounts/fireworks/models/qwen2p5-coder-7b" => 32_768,
-        "accounts/fireworks/models/minimax-m3" => 262_144,
+        "accounts/fireworks/models/minimax-m3" => 512_000,
         "accounts/fireworks/models/minimax-m2p7" => 196_608,
         "accounts/fireworks/models/glm-5p1" => 202_752,
+        "accounts/fireworks/models/glm-5p2" => 1_048_576,
         "accounts/fireworks/models/qwen3p6-plus" => 262_144,
+        "accounts/fireworks/models/qwen3p7-plus" => 262_144,
         // DeepSeek V4 via Fireworks
         "accounts/fireworks/models/deepseek-v4-pro"
-        | "accounts/fireworks/models/deepseek-v4-flash" => 1_000_000,
+        | "accounts/fireworks/models/deepseek-v4-flash" => 1_048_576,
         // DeepSeek V4 direct API
         "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-chat" | "deepseek-reasoner" => {
             1_000_000
@@ -758,6 +762,11 @@ mod tests {
         assert_eq!(resolved.provider, Provider::Anthropic);
         assert_eq!(super::max_context_tokens("aura-claude-opus-5"), 1_000_000);
 
+        let resolved = resolve_model("aura-claude-sonnet-5").expect("model alias should resolve");
+        assert_eq!(resolved.upstream_model, "claude-sonnet-5");
+        assert_eq!(resolved.provider, Provider::Anthropic);
+        assert_eq!(super::max_context_tokens("aura-claude-sonnet-5"), 1_000_000);
+
         let resolved = resolve_model("aura-gpt-5-5").expect("model alias should resolve");
         assert_eq!(resolved.requested_model, "aura-gpt-5-5");
         assert_eq!(resolved.upstream_model, "gpt-5.5");
@@ -880,30 +889,43 @@ mod tests {
 
     #[test]
     fn resolves_new_fireworks_models() {
-        for (alias, upstream) in [
-            ("aura-minimax-m3", "accounts/fireworks/models/minimax-m3"),
+        for (alias, upstream, context) in [
+            (
+                "aura-minimax-m3",
+                "accounts/fireworks/models/minimax-m3",
+                512_000,
+            ),
             (
                 "aura-minimax-m2-7",
                 "accounts/fireworks/models/minimax-m2p7",
+                196_608,
             ),
-            ("aura-glm-5-1", "accounts/fireworks/models/glm-5p1"),
-            ("aura-glm-5-2", "accounts/fireworks/models/glm-5p2"),
+            ("aura-glm-5-1", "accounts/fireworks/models/glm-5p1", 202_752),
+            (
+                "aura-glm-5-2",
+                "accounts/fireworks/models/glm-5p2",
+                1_048_576,
+            ),
             (
                 "aura-qwen3-6-plus",
                 "accounts/fireworks/models/qwen3p6-plus",
+                262_144,
             ),
             (
                 "aura-qwen3-7-plus",
                 "accounts/fireworks/models/qwen3p7-plus",
+                262_144,
             ),
             (
                 "aura-kimi-k2-7-code",
                 "accounts/fireworks/models/kimi-k2p7-code",
+                262_144,
             ),
         ] {
             let resolved = resolve_model(alias).expect("aura alias should resolve");
             assert_eq!(resolved.upstream_model, upstream);
             assert_eq!(resolved.provider, Provider::Fireworks);
+            assert_eq!(super::max_context_tokens(alias), context);
         }
     }
 
