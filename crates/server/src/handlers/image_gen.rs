@@ -11,6 +11,85 @@ use aura_router_proxy::{billing, image_gen, s3, storage};
 
 use crate::state::AppState;
 
+fn image_cost_cents(model: &str, size: &str, quality: Option<&str>) -> i64 {
+    let quality = quality.map(str::trim).map(str::to_ascii_lowercase);
+    let is_square = size == "1024x1024";
+    let provider_cost_usd: f64 = match model {
+        "gpt-image-2" => match quality.as_deref() {
+            Some("low") => {
+                if is_square {
+                    0.006
+                } else {
+                    0.005
+                }
+            }
+            Some("medium") => {
+                if is_square {
+                    0.053
+                } else {
+                    0.041
+                }
+            }
+            // `auto`, omitted, and invalid values are conservatively quoted at high quality.
+            _ => {
+                if is_square {
+                    0.211
+                } else {
+                    0.165
+                }
+            }
+        },
+        "gpt-image-1" => match quality.as_deref() {
+            Some("low") => {
+                if is_square {
+                    0.011
+                } else {
+                    0.016
+                }
+            }
+            Some("medium") => {
+                if is_square {
+                    0.042
+                } else {
+                    0.063
+                }
+            }
+            _ => {
+                if is_square {
+                    0.167
+                } else {
+                    0.250
+                }
+            }
+        },
+        "dall-e-3" => match quality.as_deref() {
+            Some("standard") => {
+                if is_square {
+                    0.040
+                } else {
+                    0.080
+                }
+            }
+            _ => {
+                if is_square {
+                    0.080
+                } else {
+                    0.120
+                }
+            }
+        },
+        "dall-e-2" => match size {
+            "256x256" => 0.016,
+            "512x512" => 0.018,
+            _ => 0.020,
+        },
+        // Gemini 2.5 Flash Image is $0.039 for a 1024px generated image.
+        "gemini-nano-banana" => 0.039,
+        _ => 0.211,
+    };
+    (provider_cost_usd * 100.0 * 1.20).round().max(1.0) as i64
+}
+
 /// POST /v1/generate-image — Generate an image.
 pub async fn generate_image(
     auth: AuthUser,
@@ -48,15 +127,7 @@ pub async fn generate_image(
     let (model, provider) =
         image_gen::resolve_image_model(input.model.as_deref(), input.prompt_mode.as_deref());
 
-    // Cost per image at high quality, 1024x1024, with 20% markup
-    let cost_cents: i64 = match model {
-        "gpt-image-2" => 25,        // $0.211 + 20% ≈ $0.25
-        "gpt-image-1" => 20,        // $0.167 + 20% = $0.20
-        "dall-e-3" => 10,           // $0.080 + 20% ≈ $0.10
-        "dall-e-2" => 3,            // $0.020 + 20% ≈ $0.03
-        "gemini-nano-banana" => 12, // ~$0.10 + 20% = $0.12
-        _ => 25,                    // default to gpt-image-2 price
-    };
+    let cost_cents = image_cost_cents(model, &input.size, input.quality.as_deref());
 
     // Pre-check credits
     let balance = billing::check_credits(
@@ -261,20 +332,13 @@ pub async fn generate_image_stream(
             .into_response());
     }
 
-    let (model, provider) = image_gen::resolve_image_model(input.model.as_deref(), input.prompt_mode.as_deref());
+    let (model, provider) =
+        image_gen::resolve_image_model(input.model.as_deref(), input.prompt_mode.as_deref());
     let model_owned = model.to_string();
     let provider_owned = provider.to_string();
     let is_iteration = input.is_iteration;
 
-    // Cost per image at high quality, 1024x1024, with 20% markup
-    let cost_cents: i64 = match model {
-        "gpt-image-2" => 25,        // $0.211 + 20% ≈ $0.25
-        "gpt-image-1" => 20,        // $0.167 + 20% = $0.20
-        "dall-e-3" => 10,           // $0.080 + 20% ≈ $0.10
-        "dall-e-2" => 3,            // $0.020 + 20% ≈ $0.03
-        "gemini-nano-banana" => 12, // ~$0.10 + 20% = $0.12
-        _ => 25,                    // default to gpt-image-2 price
-    };
+    let cost_cents = image_cost_cents(model, &input.size, input.quality.as_deref());
 
     // Public-guest requests skip billing — cost is capped by the
     // upstream rate limiter in aura-os-server.
@@ -529,7 +593,10 @@ pub async fn generate_image_stream(
     Ok((
         StatusCode::OK,
         [
-            (axum::http::header::CONTENT_TYPE, "text/event-stream".to_string()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/event-stream".to_string(),
+            ),
             (axum::http::header::CACHE_CONTROL, "no-cache".to_string()),
             (
                 axum::http::header::HeaderName::from_static("x-accel-buffering"),
@@ -541,9 +608,41 @@ pub async fn generate_image_stream(
         .into_response())
 }
 
+#[cfg(test)]
+mod pricing_tests {
+    use super::image_cost_cents;
+
+    #[test]
+    fn prices_openai_images_by_quality_and_size() {
+        assert_eq!(
+            image_cost_cents("gpt-image-2", "1024x1024", Some("medium")),
+            6
+        );
+        assert_eq!(
+            image_cost_cents("gpt-image-2", "1536x1024", Some("high")),
+            20
+        );
+        assert_eq!(
+            image_cost_cents("gpt-image-1", "1024x1024", Some("medium")),
+            5
+        );
+        assert_eq!(
+            image_cost_cents("gpt-image-1", "1024x1536", Some("high")),
+            30
+        );
+        assert_eq!(
+            image_cost_cents("dall-e-3", "1792x1024", Some("standard")),
+            10
+        );
+    }
+
+    #[test]
+    fn prices_gemini_flash_image_at_its_current_per_image_rate() {
+        assert_eq!(image_cost_cents("gemini-nano-banana", "1024x1024", None), 5);
+    }
+}
+
 /// GET /v1/generate-image/config — Available models and ETAs.
-pub async fn generate_image_config(
-    _auth: AuthUser,
-) -> Json<image_gen::ImageGenConfig> {
+pub async fn generate_image_config(_auth: AuthUser) -> Json<image_gen::ImageGenConfig> {
     Json(image_gen::get_config())
 }

@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 const TRIPO_API_BASE: &str = "https://api.tripo3d.ai/v2/openapi";
 const MODEL_VERSION: &str = "v2.0-20240919";
+/// Tripo V2 image-to-3D with the default standard texture costs 30 upstream
+/// credits ($0.30). Apply Aura's standard 20% markup.
+pub const IMAGE_TO_3D_COST_CENTS: i64 = 36;
 const POLL_INTERVAL_MS: u64 = 2000;
 const MAX_POLL_ATTEMPTS: u32 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 30;

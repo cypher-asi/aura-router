@@ -41,13 +41,13 @@ pub async fn generate_3d(
             .into_response());
     }
 
-    // Pre-check credits (3D generation: 50 credits / $0.50)
+    // Pre-check credits using the current Tripo V2 image-to-3D price.
     let balance = billing::check_credits(
         &state.http_client,
         &state.z_billing_url,
         &state.z_billing_api_key,
         &auth.user_id,
-        50,
+        tripo::IMAGE_TO_3D_COST_CENTS,
         None,
         None,
     )
@@ -56,7 +56,7 @@ pub async fn generate_3d(
     if !balance.sufficient {
         return Err(AppError::InsufficientCredits {
             balance: balance.balance_cents,
-            required: 50,
+            required: tripo::IMAGE_TO_3D_COST_CENTS,
         });
     }
 
@@ -95,7 +95,7 @@ pub async fn generate_3d(
                 &user_id,
                 "tripo",
                 "tripo-v2",
-                50, // $0.50 per 3D generation
+                tripo::IMAGE_TO_3D_COST_CENTS,
             )
             .await
             {
@@ -241,7 +241,7 @@ pub async fn generate_3d_stream(
             &state.z_billing_url,
             &state.z_billing_api_key,
             &auth.user_id,
-            50,
+            tripo::IMAGE_TO_3D_COST_CENTS,
             None,
             None,
         )
@@ -250,7 +250,7 @@ pub async fn generate_3d_stream(
         if !balance.sufficient {
             return Err(AppError::InsufficientCredits {
                 balance: balance.balance_cents,
-                required: 50,
+                required: tripo::IMAGE_TO_3D_COST_CENTS,
             });
         }
     }
@@ -310,7 +310,7 @@ pub async fn generate_3d_stream(
             &gen_user_id,
             "tripo",
             "tripo-v2",
-            50,
+            tripo::IMAGE_TO_3D_COST_CENTS,
         )
         .await;
 

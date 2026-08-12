@@ -793,6 +793,10 @@ fn spawn_post_request_tasks(
         || usage.cache_creation_1h_input_tokens > 0
         || usage.cache_read_input_tokens > 0
         || usage.web_search_requests > 0
+        || matches!(
+            usage.service_tier.as_deref(),
+            Some("priority") | Some("fast")
+        )
         || usage.inference_geo.as_deref() == Some("us")
         || usage.speed.as_deref() == Some("fast");
     let cost_cents = provider_reported_cost_cents.or_else(|| {
@@ -1653,7 +1657,7 @@ mod tests {
             None,
             None,
             "deepseek",
-            "aura-deepseek-v4-flash",
+            "deepseek-v4-flash",
             billing::UsageCostInput {
                 input_tokens: 1_000_000,
                 output_tokens: 500_000,
@@ -1676,14 +1680,14 @@ mod tests {
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["user_id"], "user-deepseek-billing");
-        assert_eq!(requests[0]["cost_cents"], 20);
+        assert_eq!(requests[0]["cost_cents"], 17);
         assert_eq!(requests[0]["metric"]["provider"], "deepseek");
-        assert_eq!(requests[0]["metric"]["model"], "aura-deepseek-v4-flash");
+        assert_eq!(requests[0]["metric"]["model"], "deepseek-v4-flash");
         assert_eq!(requests[0]["metric"]["input_tokens"], 1_000_000);
         assert_eq!(requests[0]["metric"]["output_tokens"], 500_000);
         assert_eq!(
             requests[0]["metadata"]["cost_observability"]["estimated_provider_cost_microusd"],
-            168_000
+            142_800
         );
     }
 
