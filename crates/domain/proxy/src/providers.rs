@@ -185,6 +185,11 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             upstream_model: "o4-mini",
             provider: Provider::OpenAi,
         }),
+        "aura-grok-4-6" | "xai/grok-4.6" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "grok-4.6",
+            provider: Provider::Xai,
+        }),
         "aura-grok-4-5" | "xai/grok-4.5" => Some(ResolvedModel {
             requested_model: model,
             upstream_model: "grok-4.5",
@@ -546,6 +551,7 @@ pub fn max_context_tokens(model: &str) -> u64 {
         "gpt-5.4-mini" => 400_000,
         "gpt-5.4-nano" => 400_000,
         // xAI
+        "grok-4.6" => 500_000,
         "grok-4.5" => 500_000,
         "grok-4.3" => 1_000_000,
         "grok-build-0.1" | "grok-code-fast" | "grok-code-fast-1" | "grok-code-fast-1-0825" => {
@@ -855,6 +861,7 @@ mod tests {
         assert_eq!(resolve_provider("aura-gpt-5-6-sol"), Some(Provider::OpenAi));
         assert_eq!(resolve_provider("aura-gpt-5-4"), Some(Provider::OpenAi));
         assert_eq!(resolve_provider("aura-grok-4-5"), Some(Provider::Xai));
+        assert_eq!(resolve_provider("aura-grok-4-6"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-grok-4-3"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-grok-build-0-1"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-kimi-k3"), Some(Provider::Moonshot));
@@ -982,6 +989,8 @@ mod tests {
     #[test]
     fn resolves_grok_aliases_to_xai() {
         for (alias, upstream, context) in [
+            ("aura-grok-4-6", "grok-4.6", 500_000),
+            ("xai/grok-4.6", "grok-4.6", 500_000),
             ("aura-grok-4-5", "grok-4.5", 500_000),
             ("xai/grok-4.5", "grok-4.5", 500_000),
             ("aura-grok-4-3", "grok-4.3", 1_000_000),

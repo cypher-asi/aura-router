@@ -2243,10 +2243,10 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 json!({
-                    "model": "aura-grok-4-3",
+                    "model": "aura-grok-4-6",
                     "max_tokens": 32,
                     "temperature": 0,
-                    "reasoning_effort": "minimal",
+                    "reasoning_effort": "low",
                     "messages": [
                         {
                             "role": "user",
@@ -2271,7 +2271,7 @@ mod tests {
             .expect("response bytes");
         let response: serde_json::Value =
             serde_json::from_slice(&bytes).expect("normalized xAI response");
-        assert_eq!(response["model"], "aura-grok-4-3");
+        assert_eq!(response["model"], "aura-grok-4-6");
         let text = response["content"]
             .as_array()
             .and_then(|blocks| {

@@ -82,8 +82,9 @@ pub fn request_to_upstream(
 /// - OpenAI GPT-5.4/5.5 models accept
 ///   `none`/`low`/`medium`/`high`/`xhigh`; GPT-5.6 adds `max`.
 ///   Aura's neutral `minimal` endpoint maps to `none`.
-/// - xAI Grok reasoning models accept `none`/`low`/`medium`/`high`; Aura's
-///   `minimal` maps to `none`, while larger unsupported tiers fold to `high`.
+/// - xAI Grok 4.6 accepts `low`/`medium`/`high`/`xhigh`; earlier reasoning
+///   models accept `none`/`low`/`medium`/`high`. Neutral unsupported tiers
+///   fold onto the nearest model-native value.
 /// - Fireworks open-weight models (e.g. GPT-OSS) accept
 ///   `low`/`medium`/`high` (`minimal` folds to `low`).
 /// - Moonshot Kimi K3 accepts `low`/`high`/`max`; neutral intermediate
@@ -101,7 +102,7 @@ fn apply_reasoning_effort(
     let mapped = match provider {
         Provider::OpenAi => openai_reasoning_effort(upstream_model, tier),
         Provider::Xai if xai_model_supports_reasoning_effort(upstream_model) => {
-            xai_reasoning_effort(tier)
+            xai_reasoning_effort(upstream_model, tier)
         }
         Provider::Xai => None,
         Provider::Moonshot => match tier.trim().to_ascii_lowercase().as_str() {
@@ -133,11 +134,28 @@ fn xai_model_supports_reasoning_effort(upstream_model: &str) -> bool {
         .strip_prefix("xai/")
         .or_else(|| upstream_model.strip_prefix("grok/"))
         .unwrap_or(upstream_model);
-    model == "grok-4.5" || model == "grok-4.3" || model.starts_with("grok-4.20-multi-agent")
+    model == "grok-4.6"
+        || model == "grok-4.5"
+        || model == "grok-4.3"
+        || model.starts_with("grok-4.20-multi-agent")
 }
 
-fn xai_reasoning_effort(tier: &str) -> Option<&'static str> {
-    match tier.trim().to_ascii_lowercase().as_str() {
+fn xai_reasoning_effort(upstream_model: &str, tier: &str) -> Option<&'static str> {
+    let model = upstream_model
+        .strip_prefix("xai/")
+        .or_else(|| upstream_model.strip_prefix("grok/"))
+        .unwrap_or(upstream_model);
+    let tier = tier.trim().to_ascii_lowercase();
+    if model == "grok-4.6" {
+        return match tier.as_str() {
+            "minimal" | "none" | "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
+            "xhigh" | "max" => Some("xhigh"),
+            _ => None,
+        };
+    }
+    match tier.as_str() {
         "minimal" | "none" => Some("none"),
         "low" => Some("low"),
         "medium" => Some("medium"),
@@ -346,7 +364,7 @@ fn responses_reasoning_effort(
 ) -> Option<&'static str> {
     match provider {
         Provider::Xai if xai_model_supports_reasoning_effort(upstream_model) => {
-            xai_reasoning_effort(tier)
+            xai_reasoning_effort(upstream_model, tier)
         }
         Provider::Xai => None,
         _ => openai_reasoning_effort(upstream_model, tier),
@@ -1399,6 +1417,24 @@ mod tests {
 
     #[test]
     fn translates_reasoning_effort_to_xai_native() {
+        for (tier, expected) in [
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "xhigh"),
+            ("max", "xhigh"),
+        ] {
+            let request = json!({
+                "model": "aura-grok-4-6",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "max_tokens": 1024,
+                "reasoning_effort": tier
+            });
+            let upstream = request_to_upstream(Provider::Xai, "grok-4.6", &request)
+                .expect("Grok 4.6 translation");
+            assert_eq!(upstream["reasoning_effort"], expected);
+        }
+
         let request = json!({
             "model": "aura-grok-4-5",
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
@@ -1702,6 +1738,22 @@ mod tests {
             "https://mcp.deepwiki.com/mcp"
         );
         assert_eq!(upstream["tools"][1]["allowed_tools"][0], "ask_question");
+    }
+
+    #[test]
+    fn xai_responses_request_preserves_grok_4_6_xhigh_reasoning() {
+        let request = json!({
+            "model": "aura-grok-4-6",
+            "max_tokens": 512,
+            "reasoning_effort": "xhigh",
+            "xai_tools": [{"type": "web_search"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        let upstream = anthropic_request_to_responses(Provider::Xai, &request, "grok-4.6")
+            .expect("Grok 4.6 Responses translation");
+
+        assert_eq!(upstream["model"], "grok-4.6");
+        assert_eq!(upstream["reasoning"]["effort"], "xhigh");
     }
 
     #[test]
