@@ -42,7 +42,7 @@ const XAI_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
 const GOOGLE_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
 
 /// Versioned source identifier emitted with provider-cost estimates.
-pub const PRICING_SOURCE: &str = "aura-router-static-2026-08-12";
+pub const PRICING_SOURCE: &str = "aura-router-static-2026-08-17";
 
 /// Detailed provider usage used for cost estimation and billing overrides.
 #[derive(Debug, Clone, Default)]
@@ -282,7 +282,12 @@ fn long_context_multipliers(provider: &str, model: &str, input_tokens: u64) -> (
         && input_tokens >= XAI_LONG_CONTEXT_THRESHOLD
         && (matches!(
             model,
-            "aura-grok-4-5" | "grok-4.5" | "aura-grok-4-3" | "grok-4.3"
+            "aura-grok-4-6"
+                | "grok-4.6"
+                | "aura-grok-4-5"
+                | "grok-4.5"
+                | "aura-grok-4-3"
+                | "grok-4.3"
         ) || matches!(
             model,
             "aura-grok-build-0-1"
@@ -383,6 +388,13 @@ fn xai_rates(model: &str) -> Option<CacheAwareRates> {
         .or_else(|| model.strip_prefix("grok/"))
         .unwrap_or(model);
     match model {
+        "aura-grok-4-6" | "grok-4.6" => Some(CacheAwareRates {
+            new_input_cents_per_million: 200.0,
+            cache_write_input_cents_per_million: 200.0,
+            cache_read_input_cents_per_million: 50.0,
+            output_cents_per_million: 600.0,
+            input_tokens_is_new_only: false,
+        }),
         "aura-grok-4-5" | "grok-4.5" => Some(CacheAwareRates {
             new_input_cents_per_million: 200.0,
             cache_write_input_cents_per_million: 200.0,
@@ -993,6 +1005,23 @@ mod tests {
 
     #[test]
     fn xai_grok_cache_aware_cost_discounts_cached_tokens() {
+        // Grok 4.6 stays on $0.50/M cached input and $6/M output below 200K.
+        assert_eq!(
+            cache_aware_cost_cents("xai", "aura-grok-4-6", 100_000, 100_000, 0, 100_000),
+            Some(78)
+        );
+        // At exactly 200K, the whole request steps up to $1/M cached input
+        // and $12/M output, then Aura applies its 20% markup.
+        assert_eq!(
+            cache_aware_cost_cents("xai", "aura-grok-4-6", 200_000, 100_000, 0, 200_000),
+            Some(168)
+        );
+        // Grok 4.6 long context: 1M cached @ $1/M + 500k output @ $12/M,
+        // then Aura's 20% markup.
+        assert_eq!(
+            cache_aware_cost_cents("xai", "aura-grok-4-6", 1_000_000, 500_000, 0, 1_000_000),
+            Some(840)
+        );
         // Grok's >=200K tier doubles every token rate.
         assert_eq!(
             cache_aware_cost_cents("xai", "aura-grok-4-5", 1_000_000, 500_000, 0, 1_000_000),
@@ -1465,6 +1494,12 @@ mod tests {
         assert_eq!(luna.output_cents_per_million, 120.0);
 
         assert_eq!(
+            xai_rates("grok-4.6")
+                .unwrap()
+                .cache_read_input_cents_per_million,
+            50.0
+        );
+        assert_eq!(
             xai_rates("grok-4.5")
                 .unwrap()
                 .cache_read_input_cents_per_million,
@@ -1491,11 +1526,11 @@ mod tests {
     #[test]
     fn long_context_and_priority_tiers_apply_at_published_boundaries() {
         assert_eq!(
-            long_context_multipliers("xai", "grok-4.5", 199_999),
+            long_context_multipliers("xai", "grok-4.6", 199_999),
             (1.0, 1.0)
         );
         assert_eq!(
-            long_context_multipliers("xai", "grok-4.5", 200_000),
+            long_context_multipliers("xai", "grok-4.6", 200_000),
             (2.0, 2.0)
         );
         assert_eq!(
