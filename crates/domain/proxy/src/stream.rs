@@ -191,8 +191,9 @@ impl StreamAdapter {
             Provider::OpenAi | Provider::Xai if api == OpenAiApi::Responses => {
                 Self::OpenAiResponses(OpenAiResponsesStream::new(requested_model))
             }
+            Provider::Moonshot => Self::OpenAi(OpenAiCompatStream::new(requested_model, true)),
             Provider::OpenAi | Provider::Xai | Provider::Fireworks | Provider::DeepSeek => {
-                Self::OpenAi(OpenAiCompatStream::new(requested_model))
+                Self::OpenAi(OpenAiCompatStream::new(requested_model, false))
             }
             Provider::Google => Self::Google(GoogleStream::new(requested_model)),
         }
@@ -270,6 +271,9 @@ struct OpenAiCompatStream {
     usage: StreamUsage,
     message_id: Option<String>,
     message_started: bool,
+    preserve_reasoning_content: bool,
+    thinking_block_index: Option<usize>,
+    thinking_block_open: bool,
     text_block_index: Option<usize>,
     text_block_open: bool,
     tool_blocks: BTreeMap<usize, ToolBlockState>,
@@ -289,7 +293,7 @@ struct ToolBlockState {
 }
 
 impl OpenAiCompatStream {
-    fn new(requested_model: &str) -> Self {
+    fn new(requested_model: &str, preserve_reasoning_content: bool) -> Self {
         Self {
             requested_model: requested_model.to_string(),
             buffer: String::new(),
@@ -299,6 +303,9 @@ impl OpenAiCompatStream {
             },
             message_id: None,
             message_started: false,
+            preserve_reasoning_content,
+            thinking_block_index: None,
+            thinking_block_open: false,
             text_block_index: None,
             text_block_open: false,
             tool_blocks: BTreeMap::new(),
@@ -400,6 +407,7 @@ impl OpenAiCompatStream {
             self.usage.cache_read_input_tokens = usage
                 .get("prompt_cache_hit_tokens")
                 .and_then(Value::as_u64)
+                .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
                 .or_else(|| {
                     usage
                         .get("prompt_tokens_details")
@@ -429,6 +437,27 @@ impl OpenAiCompatStream {
 
         for choice in choices {
             if let Some(delta) = choice.get("delta").and_then(Value::as_object) {
+                if self.preserve_reasoning_content {
+                    if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str)
+                    {
+                        if !reasoning.is_empty() {
+                            self.ensure_thinking_block_started(output);
+                            if let Some(index) = self.thinking_block_index {
+                                output.push_back(anthropic_sse(
+                                    "content_block_delta",
+                                    json!({
+                                        "type": "content_block_delta",
+                                        "index": index,
+                                        "delta": {
+                                            "type": "thinking_delta",
+                                            "thinking": reasoning,
+                                        }
+                                    }),
+                                ));
+                            }
+                        }
+                    }
+                }
                 if let Some(content) = delta.get("content").and_then(Value::as_str) {
                     if !content.is_empty() {
                         self.ensure_text_block_started(output);
@@ -449,6 +478,7 @@ impl OpenAiCompatStream {
                 }
 
                 if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    self.stop_thinking_block(output);
                     for tool_call in tool_calls {
                         self.process_tool_call_delta(tool_call, output);
                     }
@@ -576,18 +606,17 @@ impl OpenAiCompatStream {
         if self.text_block_open {
             return;
         }
+        self.stop_thinking_block(output);
 
         let index = if let Some(index) = self.text_block_index {
             index
-        } else if self.tool_blocks.is_empty() {
-            0
         } else {
             self.tool_blocks
                 .values()
                 .map(|state| state.content_index)
+                .chain(self.thinking_block_index)
                 .max()
-                .unwrap_or(0)
-                + 1
+                .map_or(0, |index| index + 1)
         };
 
         self.text_block_index = Some(index);
@@ -605,18 +634,62 @@ impl OpenAiCompatStream {
         ));
     }
 
-    fn tool_content_index(&self, tool_index: usize) -> usize {
-        if self.text_block_index == Some(0) {
-            tool_index + 1
-        } else {
-            tool_index
+    fn ensure_thinking_block_started(&mut self, output: &mut VecDeque<Bytes>) {
+        if self.thinking_block_open {
+            return;
         }
+        let index = self.thinking_block_index.unwrap_or_else(|| {
+            self.tool_blocks
+                .values()
+                .map(|state| state.content_index)
+                .chain(self.text_block_index)
+                .max()
+                .map_or(0, |index| index + 1)
+        });
+        self.thinking_block_index = Some(index);
+        self.thinking_block_open = true;
+        output.push_back(anthropic_sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "moonshot",
+                }
+            }),
+        ));
+    }
+
+    fn stop_thinking_block(&mut self, output: &mut VecDeque<Bytes>) {
+        if !self.thinking_block_open {
+            return;
+        }
+        if let Some(index) = self.thinking_block_index {
+            output.push_back(anthropic_sse(
+                "content_block_stop",
+                json!({
+                    "type": "content_block_stop",
+                    "index": index,
+                }),
+            ));
+        }
+        self.thinking_block_open = false;
+    }
+
+    fn tool_content_index(&self, tool_index: usize) -> usize {
+        let preceding_blocks = usize::from(self.thinking_block_index.is_some())
+            + usize::from(self.text_block_index.is_some());
+        tool_index + preceding_blocks
     }
 
     fn finish_message(&mut self, output: &mut VecDeque<Bytes>) {
         if self.finalized || !self.message_started {
             return;
         }
+
+        self.stop_thinking_block(output);
 
         if self.text_block_open {
             if let Some(index) = self.text_block_index {
@@ -1938,6 +2011,46 @@ mod tests {
         assert!(emitted
             .iter()
             .any(|chunk| chunk.contains("event: message_stop")));
+    }
+
+    #[tokio::test]
+    async fn moonshot_stream_captures_top_level_cached_tokens() {
+        let stream = bytes_stream(vec![
+            "data: {\"id\":\"chatcmpl-kimi\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Think first.\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+            "data: {\"id\":\"chatcmpl-kimi\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+            "data: {\"id\":\"chatcmpl-kimi\",\"model\":\"kimi-k3\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"cached_tokens\":40}}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let (tx, rx) = oneshot::channel();
+        let mut tee = TeeStream {
+            inner: Box::pin(stream),
+            adapter: StreamAdapter::new(
+                Provider::Moonshot,
+                OpenAiApi::ChatCompletions,
+                "aura-kimi-k3",
+            ),
+            usage_tx: Some(tx),
+            finished: false,
+            pending_output: VecDeque::new(),
+            provider_request_id: "req_moonshot".to_string(),
+        };
+
+        let mut emitted = Vec::new();
+        while let Some(chunk) = tee.next().await {
+            emitted.push(String::from_utf8_lossy(&chunk.unwrap()).to_string());
+        }
+        let joined = emitted.join("");
+
+        let usage = rx.await.unwrap();
+        assert_eq!(usage.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_input_tokens, 40);
+        assert!(joined.contains("\"type\":\"thinking\""));
+        assert!(joined.contains("\"type\":\"thinking_delta\""));
+        assert!(joined.contains("\"thinking\":\"Think first.\""));
+        assert!(joined.contains("\"index\":1"));
+        assert!(joined.contains("\"type\":\"text\""));
     }
 
     #[tokio::test]

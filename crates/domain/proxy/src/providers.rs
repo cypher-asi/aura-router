@@ -13,6 +13,7 @@ pub enum Provider {
     Anthropic,
     OpenAi,
     Xai,
+    Moonshot,
     Fireworks,
     DeepSeek,
     Google,
@@ -25,6 +26,7 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::OpenAi => "openai",
             Provider::Xai => "xai",
+            Provider::Moonshot => "moonshot",
             Provider::Fireworks => "fireworks",
             Provider::DeepSeek => "deepseek",
             Provider::Google => "google",
@@ -231,6 +233,11 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             upstream_model: "accounts/fireworks/models/deepseek-v4-flash",
             provider: Provider::Fireworks,
         }),
+        "aura-kimi-k3" | "moonshot/kimi-k3" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "kimi-k3",
+            provider: Provider::Moonshot,
+        }),
         "aura-kimi-k2-5" => Some(ResolvedModel {
             requested_model: model,
             upstream_model: "accounts/fireworks/models/kimi-k2p5",
@@ -342,6 +349,8 @@ fn infer_provider(model: &str) -> Option<Provider> {
         Some(Provider::OpenAi)
     } else if model.starts_with("grok") {
         Some(Provider::Xai)
+    } else if model == "kimi-k3" {
+        Some(Provider::Moonshot)
     } else if model.starts_with("deepseek-v4")
         || model == "deepseek-chat"
         || model == "deepseek-reasoner"
@@ -472,6 +481,7 @@ pub fn provider_url(provider: &Provider) -> &'static str {
         Provider::Anthropic => "https://api.anthropic.com/v1/messages",
         Provider::OpenAi => "https://api.openai.com/v1/chat/completions",
         Provider::Xai => "https://api.x.ai/v1/chat/completions",
+        Provider::Moonshot => "https://api.moonshot.ai/v1/chat/completions",
         // Intentionally use the stateless chat completions path for Aura's OSS lane.
         // Aura Router centrally avoids Fireworks surfaces that can retain conversation state.
         Provider::Fireworks => "https://api.fireworks.ai/inference/v1/chat/completions",
@@ -541,6 +551,8 @@ pub fn max_context_tokens(model: &str) -> u64 {
         "grok-build-0.1" | "grok-code-fast" | "grok-code-fast-1" | "grok-code-fast-1-0825" => {
             256_000
         }
+        // Moonshot
+        "kimi-k3" => 1_048_576,
         m if m.starts_with("gpt-4o") => 128_000,
         m if m.starts_with("gpt-4-turbo") => 128_000,
         m if m.starts_with("gpt-4") => 8_192,
@@ -588,7 +600,7 @@ pub fn provider_headers(provider: &Provider, api_key: &str) -> Option<HeaderMap>
                 HeaderValue::from_static(PROMPT_CACHING_BETA),
             );
         }
-        Provider::OpenAi | Provider::Xai | Provider::DeepSeek => {
+        Provider::OpenAi | Provider::Xai | Provider::Moonshot | Provider::DeepSeek => {
             headers.insert(
                 "authorization",
                 HeaderValue::from_str(&format!("Bearer {api_key}")).ok()?,
@@ -740,7 +752,12 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }],
             "tools": [{ "name": "search", "input_schema": {} }],
         });
-        for provider in [Provider::Anthropic, Provider::Fireworks, Provider::DeepSeek] {
+        for provider in [
+            Provider::Anthropic,
+            Provider::Moonshot,
+            Provider::Fireworks,
+            Provider::DeepSeek,
+        ] {
             assert_eq!(
                 openai_api_for_request(provider, &request),
                 OpenAiApi::ChatCompletions
@@ -815,6 +832,7 @@ mod tests {
             ("aura-gemini-3-1-pro", "Google"),
             ("aura-deepseek-v4-pro", "DeepSeek AI"),
             ("deepseek/deepseek-v4-flash", "DeepSeek AI"),
+            ("aura-kimi-k3", "Moonshot AI"),
             ("aura-kimi-k2-6", "Moonshot AI"),
             ("aura-minimax-m3", "MiniMax"),
             ("aura-minimax-m2-7", "MiniMax"),
@@ -839,6 +857,7 @@ mod tests {
         assert_eq!(resolve_provider("aura-grok-4-5"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-grok-4-3"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-grok-build-0-1"), Some(Provider::Xai));
+        assert_eq!(resolve_provider("aura-kimi-k3"), Some(Provider::Moonshot));
         assert_eq!(
             resolve_provider("aura-kimi-k2-5"),
             Some(Provider::Fireworks)
@@ -888,6 +907,28 @@ mod tests {
     }
 
     #[test]
+    fn resolves_kimi_k3_directly_to_moonshot() {
+        for model in ["aura-kimi-k3", "moonshot/kimi-k3", "kimi-k3"] {
+            let resolved = resolve_model(model).expect("Kimi K3 should resolve");
+            assert_eq!(resolved.upstream_model, "kimi-k3");
+            assert_eq!(resolved.provider, Provider::Moonshot);
+            assert_eq!(super::max_context_tokens(model), 1_048_576);
+        }
+        assert_eq!(
+            super::provider_url(&Provider::Moonshot),
+            "https://api.moonshot.ai/v1/chat/completions"
+        );
+        let headers =
+            provider_headers(&Provider::Moonshot, "moonshot-test-key").expect("valid headers");
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer moonshot-test-key")
+        );
+    }
+
+    #[test]
     fn resolves_new_fireworks_models() {
         for (alias, upstream, context) in [
             (
@@ -927,6 +968,7 @@ mod tests {
             assert_eq!(resolved.provider, Provider::Fireworks);
             assert_eq!(super::max_context_tokens(alias), context);
         }
+        assert_eq!(super::max_context_tokens("aura-kimi-k2-7-code"), 262_144);
     }
 
     #[test]

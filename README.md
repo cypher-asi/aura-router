@@ -49,6 +49,7 @@ curl http://localhost:3000/health
 | `ANTHROPIC_API_KEY` | Yes | Platform Anthropic API key |
 | `OPENAI_API_KEY` | No | Platform OpenAI API key (required for GPT models) |
 | `XAI_API_KEY` | No | Platform xAI API key (required for Grok models and xAI Remote MCP tools) |
+| `MOONSHOT_API_KEY` | No | Platform Moonshot API key (required for Kimi K3) |
 | `Z_BILLING_URL` | Yes | z-billing service URL |
 | `Z_BILLING_API_KEY` | Yes | z-billing service API key |
 | `AURA_NETWORK_URL` | No | aura-network URL for usage recording |
@@ -86,14 +87,14 @@ aura-router
     |-- 1. Validate JWT
     |-- 2. Check credits (z-billing)
     |-- 3. [Enrichment hook - future]
-    |-- 4. Forward to provider (Anthropic / OpenAI / xAI)
+    |-- 4. Forward to provider (Anthropic / OpenAI / xAI / Moonshot)
     |-- 5. Stream response back to client
     |-- 6. Debit credits (z-billing)
     |-- 7. Record usage (aura-network)
     |-- 8. Store messages (aura-storage)
     |
     v
-LLM Provider (api.anthropic.com / api.openai.com / api.x.ai)
+LLM Provider (api.anthropic.com / api.openai.com / api.x.ai / api.moonshot.ai)
 ```
 
 Grok requests with tools, `xai_tools`, `server_tools`, or `xai_mcp_servers`
@@ -103,6 +104,9 @@ Grok model routing uses Aura's platform `XAI_API_KEY`; user X account access
 belongs behind explicit MCP server/tool integrations.
 Aura prompt-cache keys are forwarded to xAI Chat Completions as
 `x-grok-conv-id` and to xAI Responses as `prompt_cache_key`.
+Kimi K3 routes directly to Moonshot's OpenAI-compatible Chat Completions API
+using Aura's platform `MOONSHOT_API_KEY`; stable cache keys are forwarded as
+`prompt_cache_key`.
 
 ---
 

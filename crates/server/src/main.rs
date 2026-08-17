@@ -97,6 +97,9 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|s| !s.is_empty()),
         xai_api_key: std::env::var("XAI_API_KEY").ok().filter(|s| !s.is_empty()),
+        moonshot_api_key: std::env::var("MOONSHOT_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty()),
         fireworks_api_key: std::env::var("FIREWORKS_API_KEY")
             .ok()
             .filter(|s| !s.is_empty()),
