@@ -366,12 +366,41 @@ fn sanitize_schema(schema: Value) -> Value {
                 ) {
                     continue;
                 }
+                // Gemini's Schema message represents every `enum` entry as
+                // a string, even when the declared OpenAPI type is integer,
+                // number, or boolean. Sending JSON numbers here makes Google
+                // reject the entire tool manifest before inference (for
+                // example, `enum: [4, 6, 8]`). Preserve the schema type while
+                // encoding primitive enum values in the wire format Gemini
+                // expects. Composite JSON values are outside Gemini's enum
+                // contract, so omit them rather than forwarding a request
+                // that is guaranteed to fail.
+                if key == "enum" {
+                    if let Value::Array(items) = value {
+                        let normalized: Vec<Value> =
+                            items.into_iter().filter_map(gemini_enum_value).collect();
+                        if !normalized.is_empty() {
+                            cleaned.insert(key, Value::Array(normalized));
+                        }
+                    }
+                    continue;
+                }
                 cleaned.insert(key, sanitize_schema(value));
             }
             Value::Object(cleaned)
         }
         Value::Array(items) => Value::Array(items.into_iter().map(sanitize_schema).collect()),
         other => other,
+    }
+}
+
+fn gemini_enum_value(value: Value) -> Option<Value> {
+    match value {
+        Value::String(_) => Some(value),
+        Value::Number(number) => Some(Value::String(number.to_string())),
+        Value::Bool(boolean) => Some(Value::String(boolean.to_string())),
+        Value::Null => Some(Value::String("null".to_string())),
+        Value::Array(_) | Value::Object(_) => None,
     }
 }
 
@@ -501,6 +530,39 @@ mod tests {
         let fr = &body["contents"][2]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "search_repo");
         assert_eq!(fr["response"]["result"], "found it");
+    }
+
+    #[test]
+    fn normalizes_numeric_tool_schema_enums_for_gemini() {
+        let request = json!({
+            "model": "aura-gemini-3-5-flash",
+            "tools": [{
+                "name": "render_preview",
+                "description": "Render a preview at the requested scale",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "scale": {
+                            "type": "integer",
+                            "enum": [4, 6, 8]
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "enum": [true, false]
+                        }
+                    }
+                }
+            }],
+            "messages": [{"role": "user", "content": "Render it"}]
+        });
+
+        let body = request_to_gemini("gemini-3.5-flash", &request).expect("translation");
+        let properties = &body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"];
+
+        assert_eq!(properties["scale"]["type"], "integer");
+        assert_eq!(properties["scale"]["enum"], json!(["4", "6", "8"]));
+        assert_eq!(properties["enabled"]["type"], "boolean");
+        assert_eq!(properties["enabled"]["enum"], json!(["true", "false"]));
     }
 
     #[test]
