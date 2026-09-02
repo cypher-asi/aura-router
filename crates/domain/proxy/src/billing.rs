@@ -42,7 +42,7 @@ const XAI_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
 const GOOGLE_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
 
 /// Versioned source identifier emitted with provider-cost estimates.
-pub const PRICING_SOURCE: &str = "aura-router-static-2026-08-17";
+pub const PRICING_SOURCE: &str = "aura-router-static-2026-09-02";
 
 /// Detailed provider usage used for cost estimation and billing overrides.
 #[derive(Debug, Clone, Default)]
@@ -493,6 +493,18 @@ fn anthropic_rates_on(model: &str, _date: chrono::NaiveDate) -> Option<CacheAwar
     // cache creation and cache read tokens are reported separately.
     // 5-minute ephemeral cache: write = 1.25× base input, read = 0.10× base input.
     match model {
+        "claude-fable-5-1"
+        | "aura-claude-fable-5-1"
+        | "claude-mythos-5-1"
+        | "aura-claude-mythos-5-1" => Some(CacheAwareRates {
+            new_input_cents_per_million: 1000.0,
+            cache_write_input_cents_per_million: 1250.0,
+            // Fable/Mythos 5.1 are the documented exception to Anthropic's
+            // usual 0.10× cache-read multiplier: reads cost 0.025× input.
+            cache_read_input_cents_per_million: 25.0,
+            output_cents_per_million: 5000.0,
+            input_tokens_is_new_only: true,
+        }),
         "claude-fable-5" | "aura-claude-fable-5" => Some(CacheAwareRates {
             new_input_cents_per_million: 1000.0,
             cache_write_input_cents_per_million: 1250.0,
@@ -1279,6 +1291,32 @@ mod tests {
                 Some(8_820),
                 "cache-aware cost mismatch for {model}"
             );
+        }
+    }
+
+    #[test]
+    fn anthropic_5_1_models_use_discounted_cache_reads_and_ttl_writes() {
+        let usage = UsageCostInput {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 2_000_000,
+            cache_creation_5m_input_tokens: 1_000_000,
+            cache_creation_1h_input_tokens: 1_000_000,
+            cache_read_input_tokens: 1_000_000,
+            ..UsageCostInput::default()
+        };
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+
+        for model in [
+            "claude-fable-5-1",
+            "aura-claude-fable-5-1",
+            "claude-mythos-5-1",
+            "aura-claude-mythos-5-1",
+        ] {
+            let estimate = estimate_usage_cost_on("anthropic", model, &usage, date)
+                .expect("Claude 5.1 pricing");
+            assert_eq!(estimate.provider_cost_microusd, 92_750_000, "{model}");
+            assert_eq!(estimate.billed_cost_cents, 11_130, "{model}");
         }
     }
 

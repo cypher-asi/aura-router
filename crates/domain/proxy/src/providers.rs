@@ -95,6 +95,16 @@ pub struct ResolvedModel<'a> {
 
 fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
     match model {
+        "aura-claude-fable-5-1" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "claude-fable-5-1",
+            provider: Provider::Anthropic,
+        }),
+        "aura-claude-mythos-5-1" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "claude-mythos-5-1",
+            provider: Provider::Anthropic,
+        }),
         "aura-claude-fable-5" => Some(ResolvedModel {
             requested_model: model,
             upstream_model: "claude-fable-5",
@@ -536,6 +546,7 @@ pub fn max_context_tokens(model: &str) -> u64 {
     match resolved_model {
         // Anthropic
         m if m.starts_with("claude-fable-5") => 1_000_000,
+        m if m.starts_with("claude-mythos-5") => 1_000_000,
         m if m.starts_with("claude-opus-5") => 1_000_000,
         m if m.starts_with("claude-opus-4") => 1_000_000,
         m if m.starts_with("claude-sonnet-5") => 1_000_000,
@@ -773,6 +784,17 @@ mod tests {
 
     #[test]
     fn resolves_aura_aliases_to_upstream_models() {
+        for (alias, upstream) in [
+            ("aura-claude-fable-5-1", "claude-fable-5-1"),
+            ("aura-claude-mythos-5-1", "claude-mythos-5-1"),
+        ] {
+            let resolved = resolve_model(alias).expect("Claude 5.1 alias should resolve");
+            assert_eq!(resolved.requested_model, alias);
+            assert_eq!(resolved.upstream_model, upstream);
+            assert_eq!(resolved.provider, Provider::Anthropic);
+            assert_eq!(super::max_context_tokens(alias), 1_000_000);
+        }
+
         let resolved = resolve_model("aura-claude-fable-5").expect("model alias should resolve");
         assert_eq!(resolved.requested_model, "aura-claude-fable-5");
         assert_eq!(resolved.upstream_model, "claude-fable-5");
