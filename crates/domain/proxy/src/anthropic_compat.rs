@@ -111,12 +111,17 @@ fn apply_reasoning_effort(
             "max" => Some("max"),
             _ => None,
         },
-        Provider::Fireworks => match tier.trim().to_ascii_lowercase().as_str() {
-            "minimal" | "low" => Some("low"),
-            "medium" => Some("medium"),
-            "high" | "xhigh" | "max" => Some("high"),
-            _ => None,
-        },
+        Provider::Fireworks => {
+            let is_kimi_k3 = upstream_model == "accounts/fireworks/models/kimi-k3";
+            match tier.trim().to_ascii_lowercase().as_str() {
+                "minimal" | "low" => Some("low"),
+                "medium" => Some("medium"),
+                "high" | "xhigh" => Some("high"),
+                "max" if is_kimi_k3 => Some("max"),
+                "max" => Some("high"),
+                _ => None,
+            }
+        }
         // Gemini effort maps to a `thinkingConfig` budget inside
         // `google_compat`, never an OpenAI-style top-level field.
         Provider::Anthropic | Provider::DeepSeek | Provider::Google => None,
@@ -680,6 +685,9 @@ pub fn response_from_upstream(
             Ok(next)
         }
         Provider::Moonshot => openai_response_to_anthropic(response, requested_model, true),
+        Provider::Fireworks if requested_model == "aura-kimi-k3" => {
+            openai_response_to_anthropic(response, requested_model, true)
+        }
         Provider::OpenAi | Provider::Xai | Provider::Fireworks | Provider::DeepSeek => {
             openai_response_to_anthropic(response, requested_model, false)
         }
@@ -1538,6 +1546,35 @@ mod tests {
     }
 
     #[test]
+    fn maps_managed_kimi_k3_reasoning_effort_for_fireworks() {
+        for (tier, expected) in [
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "high"),
+            ("max", "max"),
+        ] {
+            let request = json!({
+                "model": "aura-kimi-k3",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "max_tokens": 1024,
+                "reasoning_effort": tier,
+                "temperature": 0,
+                "top_p": 0.9
+            });
+            let upstream = request_to_upstream(
+                Provider::Fireworks,
+                "accounts/fireworks/models/kimi-k3",
+                &request,
+            )
+            .expect("translation");
+            assert_eq!(upstream["reasoning_effort"], expected);
+            assert_eq!(upstream["temperature"], json!(0.0));
+            assert_eq!(upstream["top_p"], json!(0.9));
+        }
+    }
+
+    #[test]
     fn preserves_kimi_k3_reasoning_content_for_tool_turn_replay() {
         let request = json!({
             "model": "aura-kimi-k3",
@@ -2028,18 +2065,20 @@ mod tests {
             }
         });
 
-        let translated = response_from_upstream(Provider::Moonshot, "aura-kimi-k3", &response)
-            .expect("translation");
-        assert_eq!(translated["model"], "aura-kimi-k3");
-        assert_eq!(translated["usage"]["input_tokens"], 100);
-        assert_eq!(translated["usage"]["output_tokens"], 20);
-        assert_eq!(translated["usage"]["cache_read_input_tokens"], 40);
-        assert_eq!(translated["content"][0]["type"], "thinking");
-        assert_eq!(
-            translated["content"][0]["thinking"],
-            "I can answer directly."
-        );
-        assert_eq!(translated["content"][1]["type"], "text");
+        for provider in [Provider::Moonshot, Provider::Fireworks] {
+            let translated =
+                response_from_upstream(provider, "aura-kimi-k3", &response).expect("translation");
+            assert_eq!(translated["model"], "aura-kimi-k3");
+            assert_eq!(translated["usage"]["input_tokens"], 100);
+            assert_eq!(translated["usage"]["output_tokens"], 20);
+            assert_eq!(translated["usage"]["cache_read_input_tokens"], 40);
+            assert_eq!(translated["content"][0]["type"], "thinking");
+            assert_eq!(
+                translated["content"][0]["thinking"],
+                "I can answer directly."
+            );
+            assert_eq!(translated["content"][1]["type"], "text");
+        }
     }
 
     #[test]

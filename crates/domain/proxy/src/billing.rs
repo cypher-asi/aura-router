@@ -495,6 +495,7 @@ fn anthropic_rates_on(model: &str, _date: chrono::NaiveDate) -> Option<CacheAwar
     match model {
         "claude-fable-5-1"
         | "aura-claude-fable-5-1"
+        | "claude-mythos-5"
         | "claude-mythos-5-1"
         | "aura-claude-mythos-5-1" => Some(CacheAwareRates {
             new_input_cents_per_million: 1000.0,
@@ -639,6 +640,13 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
     // is the total prompt size. Cached-input discounts are model-specific;
     // cache writes use the base input rate.
     match model {
+        "aura-kimi-k3" | "accounts/fireworks/models/kimi-k3" => Some(CacheAwareRates {
+            new_input_cents_per_million: 300.0,
+            cache_write_input_cents_per_million: 300.0,
+            cache_read_input_cents_per_million: 30.0,
+            output_cents_per_million: 1500.0,
+            input_tokens_is_new_only: false,
+        }),
         "aura-kimi-k2-5" | "accounts/fireworks/models/kimi-k2p5" => Some(CacheAwareRates {
             new_input_cents_per_million: 60.0,
             cache_write_input_cents_per_million: 60.0,
@@ -698,24 +706,24 @@ fn fireworks_rates(model: &str) -> Option<CacheAwareRates> {
         // DeepSeek V4 models are served via Fireworks, so they bill under the
         // "fireworks" provider. These are Fireworks' published hosted rates;
         // the standard markup is applied by `cache_aware_cost_cents`.
-        "aura-deepseek-v4-pro" | "accounts/fireworks/models/deepseek-v4-pro" => {
-            Some(CacheAwareRates {
-                new_input_cents_per_million: 174.0,
-                cache_write_input_cents_per_million: 174.0,
-                cache_read_input_cents_per_million: 14.5,
-                output_cents_per_million: 348.0,
-                input_tokens_is_new_only: false,
-            })
-        }
-        "aura-deepseek-v4-flash" | "accounts/fireworks/models/deepseek-v4-flash" => {
-            Some(CacheAwareRates {
-                new_input_cents_per_million: 14.0,
-                cache_write_input_cents_per_million: 14.0,
-                cache_read_input_cents_per_million: 2.8,
-                output_cents_per_million: 28.0,
-                input_tokens_is_new_only: false,
-            })
-        }
+        "aura-deepseek-v4-pro"
+        | "accounts/fireworks/models/deepseek-v4-pro"
+        | "accounts/fireworks/models/deepseek-v4-pro-0813" => Some(CacheAwareRates {
+            new_input_cents_per_million: 132.0,
+            cache_write_input_cents_per_million: 132.0,
+            cache_read_input_cents_per_million: 4.4,
+            output_cents_per_million: 396.0,
+            input_tokens_is_new_only: false,
+        }),
+        "aura-deepseek-v4-flash"
+        | "accounts/fireworks/models/deepseek-v4-flash"
+        | "accounts/fireworks/models/deepseek-v4-flash-0731" => Some(CacheAwareRates {
+            new_input_cents_per_million: 22.0,
+            cache_write_input_cents_per_million: 22.0,
+            cache_read_input_cents_per_million: 0.7,
+            output_cents_per_million: 66.0,
+            input_tokens_is_new_only: false,
+        }),
         "aura-minimax-m3" | "accounts/fireworks/models/minimax-m3" => Some(CacheAwareRates {
             new_input_cents_per_million: 30.0,
             cache_write_input_cents_per_million: 30.0,
@@ -1449,14 +1457,14 @@ mod tests {
                 0,
                 1_000_000,
             ),
-            Some(226)
+            Some(243)
         );
 
         // The Fireworks upstream id resolves to the same rate as the aura id.
         assert_eq!(
             cache_aware_cost_cents(
                 "fireworks",
-                "accounts/fireworks/models/deepseek-v4-pro",
+                "accounts/fireworks/models/deepseek-v4-pro-0813",
                 1_000_000,
                 500_000,
                 0,
@@ -1486,6 +1494,20 @@ mod tests {
         let alias = cache_aware_cost_cents("fireworks", "aura-kimi-k2-5", 100_000, 500, 0, 80_000);
         assert_eq!(canonical, alias);
         assert!(canonical.is_some());
+
+        let kimi = cache_aware_cost_cents(
+            "fireworks",
+            "accounts/fireworks/models/kimi-k3",
+            1_000_000,
+            500_000,
+            0,
+            400_000,
+        );
+        assert_eq!(
+            kimi,
+            cache_aware_cost_cents("fireworks", "aura-kimi-k3", 1_000_000, 500_000, 0, 400_000,)
+        );
+        assert_eq!(kimi, Some(1130));
     }
 
     #[test]
@@ -1544,6 +1566,19 @@ mod tests {
             30.0
         );
         for (model, input, cache_read, output) in [
+            ("accounts/fireworks/models/kimi-k3", 300.0, 30.0, 1500.0),
+            (
+                "accounts/fireworks/models/deepseek-v4-pro-0813",
+                132.0,
+                4.4,
+                396.0,
+            ),
+            (
+                "accounts/fireworks/models/deepseek-v4-flash-0731",
+                22.0,
+                0.7,
+                66.0,
+            ),
             ("accounts/fireworks/models/gpt-oss-120b", 15.0, 1.5, 60.0),
             ("accounts/fireworks/models/minimax-m3", 30.0, 6.0, 120.0),
             ("accounts/fireworks/models/glm-5p2", 140.0, 14.0, 440.0),

@@ -192,6 +192,9 @@ impl StreamAdapter {
                 Self::OpenAiResponses(OpenAiResponsesStream::new(requested_model))
             }
             Provider::Moonshot => Self::OpenAi(OpenAiCompatStream::new(requested_model, true)),
+            Provider::Fireworks if requested_model == "aura-kimi-k3" => {
+                Self::OpenAi(OpenAiCompatStream::new(requested_model, true))
+            }
             Provider::OpenAi | Provider::Xai | Provider::Fireworks | Provider::DeepSeek => {
                 Self::OpenAi(OpenAiCompatStream::new(requested_model, false))
             }
@@ -2050,6 +2053,43 @@ mod tests {
         assert!(joined.contains("\"type\":\"thinking_delta\""));
         assert!(joined.contains("\"thinking\":\"Think first.\""));
         assert!(joined.contains("\"index\":1"));
+        assert!(joined.contains("\"type\":\"text\""));
+    }
+
+    #[tokio::test]
+    async fn fireworks_kimi_stream_preserves_reasoning_and_cached_tokens() {
+        let stream = bytes_stream(vec![
+            "data: {\"id\":\"chatcmpl-kimi\",\"model\":\"accounts/fireworks/models/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Think first.\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+            "data: {\"id\":\"chatcmpl-kimi\",\"model\":\"accounts/fireworks/models/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+            "data: {\"id\":\"chatcmpl-kimi\",\"model\":\"accounts/fireworks/models/kimi-k3\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":40}}}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let (tx, rx) = oneshot::channel();
+        let mut tee = TeeStream {
+            inner: Box::pin(stream),
+            adapter: StreamAdapter::new(
+                Provider::Fireworks,
+                OpenAiApi::ChatCompletions,
+                "aura-kimi-k3",
+            ),
+            usage_tx: Some(tx),
+            finished: false,
+            pending_output: VecDeque::new(),
+            provider_request_id: "req_fireworks_kimi".to_string(),
+        };
+
+        let mut emitted = Vec::new();
+        while let Some(chunk) = tee.next().await {
+            emitted.push(String::from_utf8_lossy(&chunk.unwrap()).to_string());
+        }
+        let joined = emitted.join("");
+        let usage = rx.await.unwrap();
+
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_input_tokens, 40);
+        assert!(joined.contains("\"type\":\"thinking_delta\""));
+        assert!(joined.contains("\"thinking\":\"Think first.\""));
         assert!(joined.contains("\"type\":\"text\""));
     }
 
