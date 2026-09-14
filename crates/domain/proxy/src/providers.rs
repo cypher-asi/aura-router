@@ -102,7 +102,7 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
         }),
         "aura-claude-mythos-5-1" => Some(ResolvedModel {
             requested_model: model,
-            upstream_model: "claude-mythos-5-1",
+            upstream_model: "claude-mythos-5",
             provider: Provider::Anthropic,
         }),
         "aura-claude-fable-5" => Some(ResolvedModel {
@@ -224,31 +224,40 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             upstream_model: "grok-build-0.1",
             provider: Provider::Xai,
         }),
-        // DeepSeek V4 models are served via Fireworks (which hosts them
-        // verbatim) rather than DeepSeek's first-party API, so they reuse the
-        // already-provisioned FIREWORKS_API_KEY. Provider::DeepSeek remains for
-        // raw first-party passthrough names (see infer_provider).
+        // Fireworks keeps the undated DeepSeek V4 catalog entries visible even
+        // after their serverless deployments are retired. Pin the live dated
+        // revisions so picker requests do not fail with a misleading 404.
+        // Provider::DeepSeek remains for raw first-party passthrough names (see
+        // infer_provider).
         "aura-deepseek-v4-pro" => Some(ResolvedModel {
             requested_model: model,
-            upstream_model: "accounts/fireworks/models/deepseek-v4-pro",
+            upstream_model: "accounts/fireworks/models/deepseek-v4-pro-0813",
             provider: Provider::Fireworks,
         }),
         "aura-deepseek-v4-flash" => Some(ResolvedModel {
             requested_model: model,
-            upstream_model: "accounts/fireworks/models/deepseek-v4-flash",
+            upstream_model: "accounts/fireworks/models/deepseek-v4-flash-0731",
             provider: Provider::Fireworks,
         }),
         "deepseek/deepseek-v4-pro" => Some(ResolvedModel {
             requested_model: model,
-            upstream_model: "accounts/fireworks/models/deepseek-v4-pro",
+            upstream_model: "accounts/fireworks/models/deepseek-v4-pro-0813",
             provider: Provider::Fireworks,
         }),
         "deepseek/deepseek-v4-flash" => Some(ResolvedModel {
             requested_model: model,
-            upstream_model: "accounts/fireworks/models/deepseek-v4-flash",
+            upstream_model: "accounts/fireworks/models/deepseek-v4-flash-0731",
             provider: Provider::Fireworks,
         }),
-        "aura-kimi-k3" | "moonshot/kimi-k3" => Some(ResolvedModel {
+        // The managed Kimi K3 uses Fireworks because that deployment is live
+        // on Aura's shared account. Keep explicit Moonshot passthrough names
+        // on Moonshot for callers that intentionally select that provider.
+        "aura-kimi-k3" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "accounts/fireworks/models/kimi-k3",
+            provider: Provider::Fireworks,
+        }),
+        "moonshot/kimi-k3" => Some(ResolvedModel {
             requested_model: model,
             upstream_model: "kimi-k3",
             provider: Provider::Moonshot,
@@ -582,6 +591,7 @@ pub fn max_context_tokens(model: &str) -> u64 {
         "accounts/fireworks/models/kimi-k2p5" => 262_144,
         "accounts/fireworks/models/kimi-k2p6" => 262_144,
         "accounts/fireworks/models/kimi-k2p7-code" => 262_144,
+        "accounts/fireworks/models/kimi-k3" => 1_048_576,
         "accounts/fireworks/models/gpt-oss-120b" => 131_072,
         "accounts/fireworks/models/qwen2p5-coder-7b" => 32_768,
         "accounts/fireworks/models/minimax-m3" => 512_000,
@@ -592,7 +602,9 @@ pub fn max_context_tokens(model: &str) -> u64 {
         "accounts/fireworks/models/qwen3p7-plus" => 262_144,
         // DeepSeek V4 via Fireworks
         "accounts/fireworks/models/deepseek-v4-pro"
-        | "accounts/fireworks/models/deepseek-v4-flash" => 1_048_576,
+        | "accounts/fireworks/models/deepseek-v4-pro-0813"
+        | "accounts/fireworks/models/deepseek-v4-flash"
+        | "accounts/fireworks/models/deepseek-v4-flash-0731" => 1_048_576,
         // DeepSeek V4 direct API
         "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-chat" | "deepseek-reasoner" => {
             1_000_000
@@ -786,7 +798,7 @@ mod tests {
     fn resolves_aura_aliases_to_upstream_models() {
         for (alias, upstream) in [
             ("aura-claude-fable-5-1", "claude-fable-5-1"),
-            ("aura-claude-mythos-5-1", "claude-mythos-5-1"),
+            ("aura-claude-mythos-5-1", "claude-mythos-5"),
         ] {
             let resolved = resolve_model(alias).expect("Claude 5.1 alias should resolve");
             assert_eq!(resolved.requested_model, alias);
@@ -886,7 +898,7 @@ mod tests {
         assert_eq!(resolve_provider("aura-grok-4-6"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-grok-4-3"), Some(Provider::Xai));
         assert_eq!(resolve_provider("aura-grok-build-0-1"), Some(Provider::Xai));
-        assert_eq!(resolve_provider("aura-kimi-k3"), Some(Provider::Moonshot));
+        assert_eq!(resolve_provider("aura-kimi-k3"), Some(Provider::Fireworks));
         assert_eq!(
             resolve_provider("aura-kimi-k2-5"),
             Some(Provider::Fireworks)
@@ -903,19 +915,19 @@ mod tests {
 
     #[test]
     fn resolves_deepseek_v4_models_via_fireworks() {
-        // Picker-facing DeepSeek aliases route through Fireworks (which hosts
-        // the V4 models verbatim) and reuse FIREWORKS_API_KEY.
+        // Picker-facing DeepSeek aliases route through the live, dated
+        // Fireworks serverless revisions and reuse FIREWORKS_API_KEY.
         let resolved = resolve_model("aura-deepseek-v4-pro").expect("aura alias");
         assert_eq!(
             resolved.upstream_model,
-            "accounts/fireworks/models/deepseek-v4-pro"
+            "accounts/fireworks/models/deepseek-v4-pro-0813"
         );
         assert_eq!(resolved.provider, Provider::Fireworks);
 
         let resolved = resolve_model("deepseek/deepseek-v4-flash").expect("provider alias");
         assert_eq!(
             resolved.upstream_model,
-            "accounts/fireworks/models/deepseek-v4-flash"
+            "accounts/fireworks/models/deepseek-v4-flash-0731"
         );
         assert_eq!(resolved.provider, Provider::Fireworks);
 
@@ -936,9 +948,17 @@ mod tests {
     }
 
     #[test]
-    fn resolves_kimi_k3_directly_to_moonshot() {
-        for model in ["aura-kimi-k3", "moonshot/kimi-k3", "kimi-k3"] {
-            let resolved = resolve_model(model).expect("Kimi K3 should resolve");
+    fn resolves_managed_kimi_k3_via_fireworks() {
+        let resolved = resolve_model("aura-kimi-k3").expect("managed Kimi K3 should resolve");
+        assert_eq!(resolved.upstream_model, "accounts/fireworks/models/kimi-k3");
+        assert_eq!(resolved.provider, Provider::Fireworks);
+        assert_eq!(
+            super::max_context_tokens(resolved.upstream_model),
+            1_048_576
+        );
+
+        for model in ["moonshot/kimi-k3", "kimi-k3"] {
+            let resolved = resolve_model(model).expect("direct Kimi K3 should resolve");
             assert_eq!(resolved.upstream_model, "kimi-k3");
             assert_eq!(resolved.provider, Provider::Moonshot);
             assert_eq!(super::max_context_tokens(model), 1_048_576);

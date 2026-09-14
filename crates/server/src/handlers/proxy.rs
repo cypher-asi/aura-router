@@ -1697,9 +1697,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uses_moonshot_provider_for_kimi_k3_credit_check() {
+    async fn uses_fireworks_provider_for_kimi_k3_credit_check() {
         let cookie_secret = "test-cookie-secret";
-        let jwt = test_jwt(cookie_secret, "user-moonshot-credit-check");
+        let jwt = test_jwt(cookie_secret, "user-fireworks-kimi-credit-check");
         let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
             "sufficient": false,
             "balance_cents": 1,
@@ -1737,7 +1737,7 @@ mod tests {
 
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["provider"], "moonshot");
+        assert_eq!(requests[0]["provider"], "fireworks");
         assert_eq!(requests[0]["model"], "aura-kimi-k3");
     }
 
@@ -1794,7 +1794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_moonshot_cache_aware_usage_cost_to_billing() {
+    async fn reports_fireworks_kimi_cache_aware_usage_cost_to_billing() {
         let cookie_secret = "test-cookie-secret";
         let (billing_url, recorded_requests, _billing_handle) = start_recording_billing(json!({
             "sufficient": true,
@@ -1806,11 +1806,11 @@ mod tests {
 
         super::spawn_post_request_tasks(
             &state,
-            "user-moonshot-billing",
+            "user-fireworks-kimi-billing",
             None,
             None,
             None,
-            "moonshot",
+            "fireworks",
             "aura-kimi-k3",
             billing::UsageCostInput {
                 input_tokens: 1_000_000,
@@ -1821,7 +1821,7 @@ mod tests {
             None,
             None,
             123,
-            "test-event-moonshot".to_string(),
+            "test-event-fireworks-kimi".to_string(),
         );
 
         for _ in 0..20 {
@@ -1834,7 +1834,7 @@ mod tests {
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["cost_cents"], 1130);
-        assert_eq!(requests[0]["metric"]["provider"], "moonshot");
+        assert_eq!(requests[0]["metric"]["provider"], "fireworks");
         assert_eq!(requests[0]["metric"]["model"], "aura-kimi-k3");
         assert_eq!(requests[0]["metric"]["input_tokens"], 1_000_000);
         assert_eq!(requests[0]["metric"]["output_tokens"], 500_000);
@@ -2387,23 +2387,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moonshot_live_smoke_for_kimi_k3() {
+    async fn fireworks_live_smoke_for_kimi_k3() {
         dotenvy::dotenv().ok();
-        let Some(moonshot_api_key) = std::env::var("MOONSHOT_API_KEY")
+        let Some(fireworks_api_key) = std::env::var("FIREWORKS_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty())
         else {
-            eprintln!("skipping Kimi K3 live smoke test because MOONSHOT_API_KEY is missing");
+            eprintln!("skipping Kimi K3 live smoke test because FIREWORKS_API_KEY is missing");
             return;
         };
 
         let cookie_secret = "test-cookie-secret";
-        let jwt = test_jwt(cookie_secret, "user-moonshot-smoke");
+        let jwt = test_jwt(cookie_secret, "user-fireworks-kimi-smoke");
         let (billing_url, _billing_handle) = start_mock_billing().await;
 
-        let mut state = test_state(cookie_secret, billing_url, "unused".to_string(), None, None);
-        state.moonshot_api_key = Some(moonshot_api_key);
-        let app = router::create_router().with_state(state);
+        let app = router::create_router().with_state(test_state(
+            cookie_secret,
+            billing_url,
+            "unused".to_string(),
+            None,
+            Some(fireworks_api_key),
+        ));
         let req = Request::builder()
             .method("POST")
             .uri("/v1/messages")
