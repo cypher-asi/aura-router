@@ -596,12 +596,14 @@ fn apply_provider_request_controls(
             };
             body.entry("prompt_cache_key")
                 .or_insert_with(|| serde_json::Value::String(cache_key.to_string()));
-            let is_gpt_5_6 = provider == providers::Provider::OpenAi
+            let uses_30m_cache_ttl = provider == providers::Provider::OpenAi
                 && body
                     .get("model")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|model| model.starts_with("gpt-5.6"));
-            if is_gpt_5_6 {
+                    .is_some_and(|model| {
+                        model.starts_with("gpt-5.6") || model.starts_with("gpt-6")
+                    });
+            if uses_30m_cache_ttl {
                 body.remove("prompt_cache_retention");
                 body.entry("prompt_cache_options")
                     .or_insert_with(|| serde_json::json!({ "ttl": "30m" }));
@@ -1253,6 +1255,32 @@ mod tests {
         );
 
         assert_eq!(upstream["prompt_cache_key"], "instance:abc-123");
+        assert_eq!(upstream["prompt_cache_options"]["ttl"], "30m");
+        assert!(upstream.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn gpt_6_provider_controls_use_the_30_minute_cache_ttl() {
+        let session = aura_router_proxy::storage::SessionContext {
+            prompt_cache_key: Some("instance:gpt6-123".to_string()),
+            ..Default::default()
+        };
+        let mut upstream = json!({
+            "model": "gpt-6-sol",
+            "input": [],
+            "prompt_cache_retention": "24h"
+        });
+        let mut upstream_headers = reqwest::header::HeaderMap::new();
+
+        super::apply_provider_request_controls(
+            aura_router_proxy::providers::Provider::OpenAi,
+            aura_router_proxy::providers::OpenAiApi::Responses,
+            &mut upstream_headers,
+            &mut upstream,
+            Some(&session),
+        );
+
+        assert_eq!(upstream["prompt_cache_key"], "instance:gpt6-123");
         assert_eq!(upstream["prompt_cache_options"]["ttl"], "30m");
         assert!(upstream.get("prompt_cache_retention").is_none());
     }

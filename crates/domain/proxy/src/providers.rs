@@ -110,6 +110,11 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             upstream_model: "claude-fable-5",
             provider: Provider::Anthropic,
         }),
+        "aura-claude-opus-5-5" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "claude-opus-5-5",
+            provider: Provider::Anthropic,
+        }),
         "aura-claude-opus-5" => Some(ResolvedModel {
             requested_model: model,
             upstream_model: "claude-opus-5",
@@ -144,6 +149,21 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             requested_model: model,
             upstream_model: "claude-haiku-4-5",
             provider: Provider::Anthropic,
+        }),
+        "aura-gpt-6-astra" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "gpt-6-astra",
+            provider: Provider::OpenAi,
+        }),
+        "aura-gpt-6-sol" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "gpt-6-sol",
+            provider: Provider::OpenAi,
+        }),
+        "aura-gpt-6-luna" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "gpt-6-luna",
+            provider: Provider::OpenAi,
         }),
         "aura-gpt-5-6-sol" => Some(ResolvedModel {
             requested_model: model,
@@ -194,6 +214,11 @@ fn aura_model_alias(model: &str) -> Option<ResolvedModel<'_>> {
             requested_model: model,
             upstream_model: "o4-mini",
             provider: Provider::OpenAi,
+        }),
+        "aura-grok-4-7" | "xai/grok-4.7" => Some(ResolvedModel {
+            requested_model: model,
+            upstream_model: "grok-4.7",
+            provider: Provider::Xai,
         }),
         "aura-grok-4-6" | "xai/grok-4.6" => Some(ResolvedModel {
             requested_model: model,
@@ -565,13 +590,14 @@ pub fn max_context_tokens(model: &str) -> u64 {
         m if m.starts_with("claude-3") => 200_000,
         m if m.starts_with("claude") => 200_000,
         // OpenAI
+        m if m.starts_with("gpt-6") => 1_050_000,
         m if m.starts_with("gpt-5.6") => 1_050_000,
         "gpt-5.5" => 1_050_000,
         "gpt-5.4" => 1_050_000,
         "gpt-5.4-mini" => 400_000,
         "gpt-5.4-nano" => 400_000,
         // xAI
-        "grok-4.6" => 500_000,
+        "grok-4.7" | "grok-4.6" => 500_000,
         "grok-4.5" => 500_000,
         "grok-4.3" => 1_000_000,
         "grok-build-0.1" | "grok-code-fast" | "grok-code-fast-1" | "grok-code-fast-1-0825" => {
@@ -799,6 +825,7 @@ mod tests {
         for (alias, upstream) in [
             ("aura-claude-fable-5-1", "claude-fable-5-1"),
             ("aura-claude-mythos-5-1", "claude-mythos-5"),
+            ("aura-claude-opus-5-5", "claude-opus-5-5"),
         ] {
             let resolved = resolve_model(alias).expect("Claude 5.1 alias should resolve");
             assert_eq!(resolved.requested_model, alias);
@@ -831,11 +858,14 @@ mod tests {
         assert_eq!(super::max_context_tokens("aura-gpt-5-5"), 1_050_000);
 
         for (alias, upstream) in [
+            ("aura-gpt-6-astra", "gpt-6-astra"),
+            ("aura-gpt-6-sol", "gpt-6-sol"),
+            ("aura-gpt-6-luna", "gpt-6-luna"),
             ("aura-gpt-5-6-sol", "gpt-5.6-sol"),
             ("aura-gpt-5-6-terra", "gpt-5.6-terra"),
             ("aura-gpt-5-6-luna", "gpt-5.6-luna"),
         ] {
-            let resolved = resolve_model(alias).expect("GPT-5.6 alias should resolve");
+            let resolved = resolve_model(alias).expect("current GPT alias should resolve");
             assert_eq!(resolved.upstream_model, upstream);
             assert_eq!(resolved.provider, Provider::OpenAi);
             assert_eq!(super::max_context_tokens(alias), 1_050_000);
@@ -860,12 +890,17 @@ mod tests {
         // Fireworks-hosted models still resolve to their real maker, even
         // though their host provider is Fireworks.
         let cases = [
+            ("aura-claude-opus-5-5", "Anthropic"),
             ("aura-claude-opus-5", "Anthropic"),
+            ("aura-gpt-6-astra", "OpenAI"),
+            ("aura-gpt-6-sol", "OpenAI"),
+            ("aura-gpt-6-luna", "OpenAI"),
             ("aura-gpt-5-5", "OpenAI"),
             ("aura-gpt-5-6-sol", "OpenAI"),
             ("aura-gpt-5-6-terra", "OpenAI"),
             ("aura-gpt-5-6-luna", "OpenAI"),
             ("aura-oss-120b", "OpenAI"),
+            ("aura-grok-4-7", "xAI"),
             ("aura-grok-4-5", "xAI"),
             ("aura-grok-4-3", "xAI"),
             ("aura-grok-build-0-1", "xAI"),
@@ -1031,6 +1066,8 @@ mod tests {
     #[test]
     fn resolves_grok_aliases_to_xai() {
         for (alias, upstream, context) in [
+            ("aura-grok-4-7", "grok-4.7", 500_000),
+            ("xai/grok-4.7", "grok-4.7", 500_000),
             ("aura-grok-4-6", "grok-4.6", 500_000),
             ("xai/grok-4.6", "grok-4.6", 500_000),
             ("aura-grok-4-5", "grok-4.5", 500_000),

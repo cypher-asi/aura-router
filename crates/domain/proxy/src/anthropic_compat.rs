@@ -49,6 +49,7 @@ pub fn request_to_upstream(
             validate_openai_request(request)?;
             let mut upstream = anthropic_request_to_openai(request, upstream_model)?;
             apply_reasoning_effort(provider, upstream_model, request, &mut upstream);
+            remove_unsupported_openai_sampling(provider, upstream_model, &mut upstream);
             apply_openai_prompt_cache_controls(provider, upstream_model, request, &mut upstream);
             Ok(upstream)
         }
@@ -81,8 +82,9 @@ pub fn request_to_upstream(
 /// here, clamped to the values the target provider accepts:
 /// - OpenAI GPT-5.4/5.5 models accept
 ///   `none`/`low`/`medium`/`high`/`xhigh`; GPT-5.6 adds `max`.
+///   GPT-6 Sol/Luna retain that ladder, while Astra starts at `low`.
 ///   Aura's neutral `minimal` endpoint maps to `none`.
-/// - xAI Grok 4.6 accepts `low`/`medium`/`high`/`xhigh`; earlier reasoning
+/// - xAI Grok 4.7/4.6 accept `low`/`medium`/`high`/`xhigh`; earlier reasoning
 ///   models accept `none`/`low`/`medium`/`high`. Neutral unsupported tiers
 ///   fold onto the nearest model-native value.
 /// - Fireworks open-weight models (e.g. GPT-OSS) accept
@@ -139,7 +141,8 @@ fn xai_model_supports_reasoning_effort(upstream_model: &str) -> bool {
         .strip_prefix("xai/")
         .or_else(|| upstream_model.strip_prefix("grok/"))
         .unwrap_or(upstream_model);
-    model == "grok-4.6"
+    model == "grok-4.7"
+        || model == "grok-4.6"
         || model == "grok-4.5"
         || model == "grok-4.3"
         || model.starts_with("grok-4.20-multi-agent")
@@ -151,7 +154,7 @@ fn xai_reasoning_effort(upstream_model: &str, tier: &str) -> Option<&'static str
         .or_else(|| upstream_model.strip_prefix("grok/"))
         .unwrap_or(upstream_model);
     let tier = tier.trim().to_ascii_lowercase();
-    if model == "grok-4.6" {
+    if matches!(model, "grok-4.7" | "grok-4.6") {
         return match tier.as_str() {
             "minimal" | "none" | "low" => Some("low"),
             "medium" => Some("medium"),
@@ -171,18 +174,23 @@ fn xai_reasoning_effort(upstream_model: &str, tier: &str) -> Option<&'static str
 
 /// Clamp Aura's provider-neutral effort tier to the values the selected
 /// OpenAI model accepts. GPT-5.4/5.5 replaced `minimal` with `none` and
-/// added `xhigh`; GPT-5.6 adds a distinct `max` tier above `xhigh`.
+/// added `xhigh`; GPT-5.6 and GPT-6 add a distinct `max` tier above `xhigh`.
+/// GPT-6 Astra does not expose `none`, so the neutral minimum maps to `low`.
 /// Older models retain the legacy ladder.
 fn openai_reasoning_effort(upstream_model: &str, tier: &str) -> Option<&'static str> {
+    let is_gpt_6_astra = upstream_model == "gpt-6-astra";
+    let is_gpt_6 = upstream_model.starts_with("gpt-6");
     let is_gpt_5_6 = upstream_model.starts_with("gpt-5.6");
-    let current_ladder = is_gpt_5_6
+    let current_ladder = is_gpt_6
+        || is_gpt_5_6
         || upstream_model.starts_with("gpt-5.4")
         || upstream_model.starts_with("gpt-5.5");
     match (
         current_ladder,
-        is_gpt_5_6,
+        is_gpt_6 || is_gpt_5_6,
         tier.trim().to_ascii_lowercase().as_str(),
     ) {
+        (true, _, "minimal" | "none") if is_gpt_6_astra => Some("low"),
         (true, _, "minimal" | "none") => Some("none"),
         (true, _, "low") => Some("low"),
         (true, _, "medium") => Some("medium"),
@@ -198,9 +206,31 @@ fn openai_reasoning_effort(upstream_model: &str, tier: &str) -> Option<&'static 
     }
 }
 
+/// GPT-6 reasoning requests reject sampling controls. Sol and Luna allow
+/// them only when reasoning is explicitly disabled; Astra has no `none` tier.
+fn remove_unsupported_openai_sampling(
+    provider: Provider,
+    upstream_model: &str,
+    upstream: &mut Value,
+) {
+    if provider != Provider::OpenAi || !upstream_model.starts_with("gpt-6") {
+        return;
+    }
+    let reasoning_disabled =
+        upstream.get("reasoning_effort").and_then(Value::as_str) == Some("none");
+    if reasoning_disabled {
+        return;
+    }
+    if let Some(object) = upstream.as_object_mut() {
+        for key in ["temperature", "top_p", "logprobs", "top_logprobs"] {
+            object.remove(key);
+        }
+    }
+}
+
 /// Preserve the cache controls the harness carries on its
-/// Anthropic-compatible body. GPT-5.6 requires a stable key for reliable
-/// matching and replaces the legacy retention field with a 30-minute TTL.
+/// Anthropic-compatible body. GPT-5.6 and later use a stable key plus a
+/// 30-minute TTL in place of the legacy retention field.
 /// GPT-5.5 accepts only 24-hour retention; GPT-5.4 also accepts in-memory
 /// retention. Smaller 5.4 variants must not receive an unsupported value.
 fn apply_openai_prompt_cache_controls(
@@ -233,7 +263,9 @@ fn apply_openai_prompt_cache_controls(
         return;
     }
 
-    if cache_key.is_some() && upstream_model.starts_with("gpt-5.6") {
+    if cache_key.is_some()
+        && (upstream_model.starts_with("gpt-5.6") || upstream_model.starts_with("gpt-6"))
+    {
         object.insert("prompt_cache_options".to_string(), json!({ "ttl": "30m" }));
         return;
     }
@@ -1410,6 +1442,33 @@ mod tests {
     }
 
     #[test]
+    fn translates_gpt_6_effort_cache_and_sampling_controls() {
+        let request = json!({
+            "model": "aura-gpt-6-astra",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "minimal",
+            "prompt_cache_key": "instance:abc-123",
+            "temperature": 0.7,
+            "top_p": 0.9
+        });
+        let astra =
+            request_to_upstream(Provider::OpenAi, "gpt-6-astra", &request).expect("translation");
+        assert_eq!(astra["reasoning_effort"], "low");
+        assert_eq!(astra["prompt_cache_options"]["ttl"], "30m");
+        assert!(astra.get("temperature").is_none());
+        assert!(astra.get("top_p").is_none());
+
+        let mut sol_request = request.clone();
+        sol_request["model"] = json!("aura-gpt-6-sol");
+        sol_request["reasoning_effort"] = json!("minimal");
+        let sol =
+            request_to_upstream(Provider::OpenAi, "gpt-6-sol", &sol_request).expect("translation");
+        assert_eq!(sol["reasoning_effort"], "none");
+        assert_eq!(sol["temperature"], 0.7);
+        assert_eq!(sol["top_p"], 0.9);
+    }
+
+    #[test]
     fn drops_unsupported_extended_retention_for_gpt_5_4_mini() {
         let request = json!({
             "model": "aura-gpt-5-4-mini",
@@ -1425,22 +1484,24 @@ mod tests {
 
     #[test]
     fn translates_reasoning_effort_to_xai_native() {
-        for (tier, expected) in [
-            ("low", "low"),
-            ("medium", "medium"),
-            ("high", "high"),
-            ("xhigh", "xhigh"),
-            ("max", "xhigh"),
-        ] {
-            let request = json!({
-                "model": "aura-grok-4-6",
-                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-                "max_tokens": 1024,
-                "reasoning_effort": tier
-            });
-            let upstream = request_to_upstream(Provider::Xai, "grok-4.6", &request)
-                .expect("Grok 4.6 translation");
-            assert_eq!(upstream["reasoning_effort"], expected);
+        for model in ["grok-4.7", "grok-4.6"] {
+            for (tier, expected) in [
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+                ("xhigh", "xhigh"),
+                ("max", "xhigh"),
+            ] {
+                let request = json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                    "max_tokens": 1024,
+                    "reasoning_effort": tier
+                });
+                let upstream = request_to_upstream(Provider::Xai, model, &request)
+                    .expect("current Grok translation");
+                assert_eq!(upstream["reasoning_effort"], expected);
+            }
         }
 
         let request = json!({
