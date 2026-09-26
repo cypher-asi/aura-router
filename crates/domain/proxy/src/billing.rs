@@ -258,6 +258,7 @@ fn anthropic_fast_mode_multiplier(provider: &str, model: &str, speed: Option<&st
     }
     let model = model.strip_prefix("anthropic/").unwrap_or(model);
     match model {
+        "claude-opus-5-5" | "aura-claude-opus-5-5" => 2.0,
         "claude-opus-5" | "aura-claude-opus-5" => 2.0,
         "claude-opus-4-8" | "aura-claude-opus-4-8" => 2.0,
         _ => 1.0,
@@ -277,12 +278,16 @@ fn long_context_multipliers(provider: &str, model: &str, input_tokens: u64) -> (
             model,
             "aura-gpt-5-4" | "gpt-5.4" | "aura-gpt-5-5" | "gpt-5.5"
         ) || model.starts_with("aura-gpt-5-6-")
-            || model.starts_with("gpt-5.6"));
+            || model.starts_with("gpt-5.6")
+            || model.starts_with("aura-gpt-6-")
+            || model.starts_with("gpt-6"));
     let xai_long = provider == "xai"
         && input_tokens >= XAI_LONG_CONTEXT_THRESHOLD
         && (matches!(
             model,
-            "aura-grok-4-6"
+            "aura-grok-4-7"
+                | "grok-4.7"
+                | "aura-grok-4-6"
                 | "grok-4.6"
                 | "aura-grok-4-5"
                 | "grok-4.5"
@@ -321,7 +326,9 @@ fn openai_service_tier_multiplier(provider: &str, model: &str, service_tier: Opt
     let model = model.strip_prefix("openai/").unwrap_or(model);
     if matches!(model, "aura-gpt-5-5" | "gpt-5.5") {
         2.5
-    } else if model.starts_with("gpt-5.6")
+    } else if model.starts_with("gpt-6")
+        || model.starts_with("aura-gpt-6-")
+        || model.starts_with("gpt-5.6")
         || model.starts_with("aura-gpt-5-6-")
         || matches!(
             model,
@@ -388,6 +395,13 @@ fn xai_rates(model: &str) -> Option<CacheAwareRates> {
         .or_else(|| model.strip_prefix("grok/"))
         .unwrap_or(model);
     match model {
+        "aura-grok-4-7" | "grok-4.7" => Some(CacheAwareRates {
+            new_input_cents_per_million: 200.0,
+            cache_write_input_cents_per_million: 200.0,
+            cache_read_input_cents_per_million: 50.0,
+            output_cents_per_million: 600.0,
+            input_tokens_is_new_only: false,
+        }),
         "aura-grok-4-6" | "grok-4.6" => Some(CacheAwareRates {
             new_input_cents_per_million: 200.0,
             cache_write_input_cents_per_million: 200.0,
@@ -513,6 +527,13 @@ fn anthropic_rates_on(model: &str, _date: chrono::NaiveDate) -> Option<CacheAwar
             output_cents_per_million: 5000.0,
             input_tokens_is_new_only: true,
         }),
+        "claude-opus-5-5" | "aura-claude-opus-5-5" => Some(CacheAwareRates {
+            new_input_cents_per_million: 400.0,
+            cache_write_input_cents_per_million: 500.0,
+            cache_read_input_cents_per_million: 20.0,
+            output_cents_per_million: 2000.0,
+            input_tokens_is_new_only: true,
+        }),
         "claude-opus-5"
         | "claude-opus-4-6"
         | "claude-opus-4-7"
@@ -580,11 +601,32 @@ fn openai_rates(model: &str) -> Option<CacheAwareRates> {
     let model = model.strip_prefix("openai/").unwrap_or(model);
 
     match model {
+        "aura-gpt-6-astra" | "gpt-6-astra" => Some(CacheAwareRates {
+            new_input_cents_per_million: 1000.0,
+            cache_write_input_cents_per_million: 1250.0,
+            cache_read_input_cents_per_million: 100.0,
+            output_cents_per_million: 5000.0,
+            input_tokens_is_new_only: false,
+        }),
+        "aura-gpt-6-sol" | "gpt-6-sol" => Some(CacheAwareRates {
+            new_input_cents_per_million: 200.0,
+            cache_write_input_cents_per_million: 250.0,
+            cache_read_input_cents_per_million: 20.0,
+            output_cents_per_million: 1000.0,
+            input_tokens_is_new_only: false,
+        }),
+        "aura-gpt-6-luna" | "gpt-6-luna" => Some(CacheAwareRates {
+            new_input_cents_per_million: 10.0,
+            cache_write_input_cents_per_million: 12.5,
+            cache_read_input_cents_per_million: 1.0,
+            output_cents_per_million: 50.0,
+            input_tokens_is_new_only: false,
+        }),
         "aura-gpt-5-6-sol" | "gpt-5.6" | "gpt-5.6-sol" => Some(CacheAwareRates {
-            new_input_cents_per_million: 500.0,
-            cache_write_input_cents_per_million: 625.0,
-            cache_read_input_cents_per_million: 50.0,
-            output_cents_per_million: 3000.0,
+            new_input_cents_per_million: 400.0,
+            cache_write_input_cents_per_million: 500.0,
+            cache_read_input_cents_per_million: 40.0,
+            output_cents_per_million: 2000.0,
             input_tokens_is_new_only: false,
         }),
         "aura-gpt-5-6-terra" | "gpt-5.6-terra" => Some(CacheAwareRates {
@@ -978,8 +1020,8 @@ mod tests {
 
     #[test]
     fn gpt_5_6_cache_writes_use_the_published_premium() {
-        // Long-context Sol: 500k new @ $10/M + 200k writes @ $12.50/M +
-        // 300k reads @ $1/M + 500k output @ $45/M, then 20% markup.
+        // Long-context Sol: 500k new @ $8/M + 200k writes @ $10/M +
+        // 300k reads @ $0.80/M + 500k output @ $30/M, then 20% markup.
         assert_eq!(
             cache_aware_cost_cents(
                 "openai",
@@ -989,7 +1031,7 @@ mod tests {
                 200_000,
                 300_000,
             ),
-            Some(3636)
+            Some(2549)
         );
 
         // Below the threshold, Luna cache writes remain 1.25x input.
@@ -1174,6 +1216,26 @@ mod tests {
                 estimate.billed_cost_cents, 5_610,
                 "marked-up cost mismatch for {model}"
             );
+        }
+    }
+
+    #[test]
+    fn anthropic_opus_5_5_uses_published_cache_rates() {
+        let usage = UsageCostInput {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 1_000_000,
+            cache_creation_5m_input_tokens: 1_000_000,
+            cache_read_input_tokens: 1_000_000,
+            ..UsageCostInput::default()
+        };
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
+
+        for model in ["claude-opus-5-5", "aura-claude-opus-5-5"] {
+            let estimate =
+                estimate_usage_cost_on("anthropic", model, &usage, date).expect("Opus 5.5 pricing");
+            assert_eq!(estimate.provider_cost_microusd, 29_200_000);
+            assert_eq!(estimate.billed_cost_cents, 3504);
         }
     }
 
@@ -1544,6 +1606,24 @@ mod tests {
 
     #[test]
     fn current_rate_card_matches_provider_publications() {
+        let astra = openai_rates("gpt-6-astra").unwrap();
+        assert_eq!(astra.new_input_cents_per_million, 1000.0);
+        assert_eq!(astra.cache_write_input_cents_per_million, 1250.0);
+        assert_eq!(astra.cache_read_input_cents_per_million, 100.0);
+        assert_eq!(astra.output_cents_per_million, 5000.0);
+
+        let sol = openai_rates("gpt-6-sol").unwrap();
+        assert_eq!(sol.new_input_cents_per_million, 200.0);
+        assert_eq!(sol.output_cents_per_million, 1000.0);
+
+        let luna_6 = openai_rates("gpt-6-luna").unwrap();
+        assert_eq!(luna_6.new_input_cents_per_million, 10.0);
+        assert_eq!(luna_6.output_cents_per_million, 50.0);
+
+        let sol_5_6 = openai_rates("gpt-5.6-sol").unwrap();
+        assert_eq!(sol_5_6.new_input_cents_per_million, 400.0);
+        assert_eq!(sol_5_6.output_cents_per_million, 2000.0);
+
         let terra = openai_rates("gpt-5.6-terra").unwrap();
         assert_eq!(terra.new_input_cents_per_million, 200.0);
         assert_eq!(terra.cache_write_input_cents_per_million, 250.0);
@@ -1553,6 +1633,12 @@ mod tests {
         assert_eq!(luna.new_input_cents_per_million, 20.0);
         assert_eq!(luna.output_cents_per_million, 120.0);
 
+        assert_eq!(
+            xai_rates("grok-4.7")
+                .unwrap()
+                .cache_read_input_cents_per_million,
+            50.0
+        );
         assert_eq!(
             xai_rates("grok-4.6")
                 .unwrap()

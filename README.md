@@ -104,8 +104,12 @@ Grok model routing uses Aura's platform `XAI_API_KEY`; user X account access
 belongs behind explicit MCP server/tool integrations.
 Aura prompt-cache keys are forwarded to xAI Chat Completions as
 `x-grok-conv-id` and to xAI Responses as `prompt_cache_key`.
-Grok 4.6 is available as `aura-grok-4-6`, `grok-4.6`, or `xai/grok-4.6`,
+Grok 4.7 is available as `aura-grok-4-7`, `grok-4.7`, or `xai/grok-4.7`,
 with a 500K context window and native low/medium/high/xhigh reasoning.
+GPT-6 Astra, Sol, and Luna are available through their `aura-gpt-6-*`
+aliases with 1.05M context windows, 30-minute prompt caching, and native
+reasoning-effort controls. Claude Opus 5.5 is available as
+`aura-claude-opus-5-5` with a 1M context window and adaptive thinking.
 Kimi K3 routes directly to Moonshot's OpenAI-compatible Chat Completions API
 using Aura's platform `MOONSHOT_API_KEY`; stable cache keys are forwarded as
 `prompt_cache_key`.
