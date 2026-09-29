@@ -605,6 +605,7 @@ pub fn max_context_tokens(model: &str) -> u64 {
         }
         // Moonshot
         "kimi-k3" => 1_048_576,
+        "gpt-4.1" => 1_047_576,
         m if m.starts_with("gpt-4o") => 128_000,
         m if m.starts_with("gpt-4-turbo") => 128_000,
         m if m.starts_with("gpt-4") => 8_192,
@@ -635,8 +636,8 @@ pub fn max_context_tokens(model: &str) -> u64 {
         "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-chat" | "deepseek-reasoner" => {
             1_000_000
         }
-        // Google Gemini — the 2.5 and 3 families all expose a 1M token window.
-        m if m.starts_with("gemini") => 1_000_000,
+        // Google Gemini — the 2.5 and 3 families expose a 1,048,576-token window.
+        m if m.starts_with("gemini") => 1_048_576,
         _ => 200_000, // safe default
     }
 }
@@ -1090,6 +1091,60 @@ mod tests {
     }
 
     #[test]
+    fn legacy_gpt_4_1_keeps_its_full_context_window() {
+        assert_eq!(super::max_context_tokens("aura-gpt-4.1"), 1_047_576);
+        assert_eq!(super::max_context_tokens("gpt-4.1"), 1_047_576);
+    }
+
+    #[test]
+    fn current_managed_model_context_windows_are_explicit() {
+        for (model, expected) in [
+            ("aura-claude-fable-5-1", 1_000_000),
+            ("aura-claude-opus-5-5", 1_000_000),
+            ("aura-claude-fable-5", 1_000_000),
+            ("aura-claude-opus-5", 1_000_000),
+            ("aura-claude-opus-4-8", 1_000_000),
+            ("aura-claude-opus-4-7", 1_000_000),
+            ("aura-claude-opus-4-6", 1_000_000),
+            ("aura-claude-sonnet-5", 1_000_000),
+            ("aura-claude-sonnet-4-6", 1_000_000),
+            ("aura-claude-haiku-4-5", 200_000),
+            ("aura-gpt-6-astra", 1_050_000),
+            ("aura-gpt-6-sol", 1_050_000),
+            ("aura-gpt-6-luna", 1_050_000),
+            ("aura-gpt-5-6-sol", 1_050_000),
+            ("aura-gpt-5-6-terra", 1_050_000),
+            ("aura-gpt-5-6-luna", 1_050_000),
+            ("aura-gpt-5-5", 1_050_000),
+            ("aura-gpt-5-4", 1_050_000),
+            ("aura-gpt-5-4-mini", 400_000),
+            ("aura-gpt-5-4-nano", 400_000),
+            ("aura-oss-120b", 131_072),
+            ("aura-grok-4-7", 500_000),
+            ("aura-grok-4-6", 500_000),
+            ("aura-grok-4-5", 500_000),
+            ("aura-grok-4-3", 1_000_000),
+            ("aura-grok-build-0-1", 256_000),
+            ("aura-deepseek-v4-pro", 1_048_576),
+            ("aura-deepseek-v4-flash", 1_048_576),
+            ("aura-kimi-k3", 1_048_576),
+            ("aura-kimi-k2-7-code", 262_144),
+            ("aura-kimi-k2-6", 262_144),
+            ("aura-minimax-m3", 512_000),
+            ("aura-glm-5-2", 1_048_576),
+            ("aura-gemini-3-1-pro", 1_048_576),
+            ("aura-gemini-3-5-flash", 1_048_576),
+            ("aura-gemini-3-flash", 1_048_576),
+            ("aura-gemini-3-1-flash-lite", 1_048_576),
+            ("aura-gemini-2-5-pro", 1_048_576),
+            ("aura-gemini-2-5-flash", 1_048_576),
+            ("aura-gemini-2-5-flash-lite", 1_048_576),
+        ] {
+            assert_eq!(super::max_context_tokens(model), expected, "{model}");
+        }
+    }
+
+    #[test]
     fn resolves_gemini_aliases_to_google() {
         for (alias, upstream) in [
             ("aura-gemini-3-1-pro", "gemini-3.1-pro-preview"),
@@ -1111,7 +1166,7 @@ mod tests {
         let resolved = resolve_model("gemini-2.5-flash").expect("api model should resolve");
         assert_eq!(resolved.upstream_model, "gemini-2.5-flash");
         assert_eq!(resolved.provider, Provider::Google);
-        assert_eq!(super::max_context_tokens("aura-gemini-2-5-pro"), 1_000_000);
+        assert_eq!(super::max_context_tokens("aura-gemini-2-5-pro"), 1_048_576);
     }
 
     #[test]
