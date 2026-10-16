@@ -2091,6 +2091,45 @@ mod tests {
         assert!(joined.contains("\"type\":\"thinking_delta\""));
         assert!(joined.contains("\"thinking\":\"Think first.\""));
         assert!(joined.contains("\"type\":\"text\""));
+
+        // Replay the actual thinking block emitted by the streaming adapter,
+        // not a hand-written signature, through the managed route's next call.
+        let events: Vec<Value> = joined
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str(data).ok())
+            .collect();
+        let mut thinking = events
+            .iter()
+            .find_map(|event| {
+                let block = event.get("content_block")?;
+                (block["type"] == "thinking").then(|| block.clone())
+            })
+            .expect("stream thinking block");
+        let reasoning: String = events
+            .iter()
+            .filter_map(|event| event.pointer("/delta/thinking").and_then(Value::as_str))
+            .collect();
+        thinking["thinking"] = Value::String(reasoning.clone());
+        let followup = json!({
+            "model": "aura-kimi-k3",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": [thinking, {"type": "text", "text": "Hello"}]},
+                {"role": "user", "content": "Continue"}
+            ]
+        });
+        crate::anthropic_compat::validate_request(Provider::Fireworks, &followup)
+            .expect("accept reasoning emitted by the Kimi stream");
+        let upstream = crate::anthropic_compat::request_to_upstream(
+            Provider::Fireworks,
+            "accounts/fireworks/models/kimi-k3",
+            &followup,
+        )
+        .expect("translate streaming history");
+        assert_eq!(upstream["messages"][1]["reasoning_content"], reasoning);
+        assert_eq!(upstream["messages"][1]["content"], "Hello");
     }
 
     #[tokio::test]

@@ -3,6 +3,10 @@ use serde_json::{json, Value};
 use crate::google_compat;
 use crate::providers::Provider;
 
+#[cfg(test)]
+#[path = "anthropic_compat_kimi_tests.rs"]
+mod kimi_tests;
+
 pub fn validate_request(provider: Provider, request: &Value) -> Result<(), String> {
     match provider {
         Provider::Anthropic => Ok(()),
@@ -14,10 +18,7 @@ pub fn validate_request(provider: Provider, request: &Value) -> Result<(), Strin
             validate_openai_request(request)
         }
         Provider::Moonshot => validate_moonshot_request(request),
-        Provider::Fireworks => {
-            validate_openai_request(request)?;
-            validate_fireworks_privacy_policy(request)
-        }
+        Provider::Fireworks => validate_fireworks_request(request),
     }
 }
 
@@ -46,7 +47,7 @@ pub fn request_to_upstream(
             Ok(next)
         }
         Provider::OpenAi | Provider::Xai | Provider::Fireworks | Provider::DeepSeek => {
-            validate_openai_request(request)?;
+            validate_request(provider, request)?;
             let mut upstream = anthropic_request_to_openai(request, upstream_model)?;
             apply_reasoning_effort(provider, upstream_model, request, &mut upstream);
             remove_unsupported_openai_sampling(provider, upstream_model, &mut upstream);
@@ -865,6 +866,32 @@ fn validate_openai_request(request: &Value) -> Result<(), String> {
 
 fn validate_moonshot_request(request: &Value) -> Result<(), String> {
     validate_openai_compatible_request(request, true)
+}
+
+fn validate_fireworks_request(request: &Value) -> Result<(), String> {
+    // The managed Kimi response adapters emit reasoning_content as thinking
+    // blocks, just like the direct Moonshot lane. Accept that history on the
+    // return trip, without enabling Anthropic thinking config or broadening
+    // the content-block contract of other Fireworks models.
+    let is_managed_kimi = request.get("model").and_then(Value::as_str) == Some("aura-kimi-k3");
+    validate_openai_compatible_request(request, is_managed_kimi)?;
+    if is_managed_kimi {
+        for message in request["messages"].as_array().into_iter().flatten() {
+            for block in message["content"].as_array().into_iter().flatten() {
+                // Both Kimi response adapters mint this marker; foreign
+                // Anthropic-signed thinking must not become Kimi reasoning.
+                if block.get("type").and_then(Value::as_str) == Some("thinking")
+                    && block.get("signature").and_then(Value::as_str) != Some("moonshot")
+                {
+                    return Err(
+                        "Fireworks-backed Kimi models only support replaying Kimi reasoning blocks on /v1/messages"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    validate_fireworks_privacy_policy(request)
 }
 
 fn validate_openai_compatible_request(
